@@ -8,8 +8,10 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/blang/semver"
 	"github.com/rancher/norman/api/access"
 	"github.com/rancher/norman/httperror"
+	"github.com/rancher/norman/parse/builder"
 	"github.com/rancher/norman/store/transform"
 	"github.com/rancher/norman/types"
 	"github.com/rancher/norman/types/convert"
@@ -18,8 +20,9 @@ import (
 	"github.com/rancher/rancher/pkg/clustermanager"
 	"github.com/rancher/rancher/pkg/controllers/management/clusterprovisioner"
 	"github.com/rancher/rancher/pkg/controllers/management/clusterstatus"
+	"github.com/rancher/rancher/pkg/namespace"
 	"github.com/rancher/rancher/pkg/settings"
-	"github.com/rancher/types/apis/management.cattle.io/v3"
+	v3 "github.com/rancher/types/apis/management.cattle.io/v3"
 	managementv3 "github.com/rancher/types/client/management/v3"
 	"github.com/rancher/types/config"
 	"github.com/sirupsen/logrus"
@@ -33,9 +36,11 @@ const (
 
 type Store struct {
 	types.Store
-	ShellHandler          types.RequestHandler
-	mu                    sync.Mutex
-	KontainerDriverLister v3.KontainerDriverLister
+	ShellHandler                  types.RequestHandler
+	mu                            sync.Mutex
+	KontainerDriverLister         v3.KontainerDriverLister
+	ClusterTemplateLister         v3.ClusterTemplateLister
+	ClusterTemplateRevisionLister v3.ClusterTemplateRevisionLister
 }
 
 type transformer struct {
@@ -83,7 +88,7 @@ func (t *transformer) transposeGenericConfigToDynamicField(data map[string]inter
 	return data, nil
 }
 
-func SetClusterStore(schema *types.Schema, mgmt *config.ScaledContext, clusterManager *clustermanager.Manager, k8sProxy http.Handler) {
+func GetClusterStore(schema *types.Schema, mgmt *config.ScaledContext, clusterManager *clustermanager.Manager, k8sProxy http.Handler) *Store {
 	transformer := transformer{
 		KontainerDriverLister: mgmt.Management.KontainerDrivers("").Controller().Lister(),
 	}
@@ -98,12 +103,14 @@ func SetClusterStore(schema *types.Schema, mgmt *config.ScaledContext, clusterMa
 	}
 
 	s := &Store{
-		Store:                 t,
-		KontainerDriverLister: mgmt.Management.KontainerDrivers("").Controller().Lister(),
-		ShellHandler:          linkHandler.LinkHandler,
+		Store:                         t,
+		KontainerDriverLister:         mgmt.Management.KontainerDrivers("").Controller().Lister(),
+		ShellHandler:                  linkHandler.LinkHandler,
+		ClusterTemplateLister:         mgmt.Management.ClusterTemplates("").Controller().Lister(),
+		ClusterTemplateRevisionLister: mgmt.Management.ClusterTemplateRevisions("").Controller().Lister(),
 	}
-
 	schema.Store = s
+	return s
 }
 
 func transformSetNilSnapshotFalse(data map[string]interface{}) map[string]interface{} {
@@ -156,11 +163,26 @@ func (r *Store) Create(apiContext *types.APIContext, schema *types.Schema, data 
 		return nil, err
 	}
 
-	setKubernetesVersion(data)
+	//check if template is passed. if yes, load template data
+	if hasTemplate(data) {
+		clusterTemplateRevision, err := r.validateTemplateInput(data, false)
+		if err != nil {
+			return nil, err
+		}
+		data, err = loadDataFromTemplate(clusterTemplateRevision, data)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	err := setKubernetesVersion(data)
+	if err != nil {
+		return nil, err
+	}
 	// enable local backups for rke clusters by default
 	enableLocalBackup(data)
 
-	data, err := r.transposeDynamicFieldToGenericConfig(data)
+	data, err = r.transposeDynamicFieldToGenericConfig(data)
 	if err != nil {
 		return nil, err
 	}
@@ -183,6 +205,97 @@ func (r *Store) Create(apiContext *types.APIContext, schema *types.Schema, data 
 	}
 
 	return r.Store.Create(apiContext, schema, data)
+}
+
+func loadDataFromTemplate(clusterTemplateRevision *v3.ClusterTemplateRevision, data map[string]interface{}) (map[string]interface{}, error) {
+	dataFromTemplate, err := convert.EncodeToMap(clusterTemplateRevision.Spec.ClusterConfig)
+	if err != nil {
+		return nil, err
+	}
+	dataFromTemplate["name"] = convert.ToString(data["name"])
+	dataFromTemplate["description"] = convert.ToString(data[managementv3.ClusterSpecFieldDisplayName])
+	dataFromTemplate["clusterTemplateId"] = convert.ToString(data[managementv3.ClusterSpecFieldClusterTemplateID])
+	dataFromTemplate["clusterTemplateRevisionId"] = convert.ToString(data[managementv3.ClusterSpecFieldClusterTemplateRevisionID])
+
+	//Add in any answers to the clusterTemplateRevision's Questions[]
+	answers := convert.ToMapInterface(data[managementv3.ClusterSpecFieldClusterTemplateAnswers])
+	allAnswers := convert.ToMapInterface(answers["values"])
+
+	for _, question := range clusterTemplateRevision.Spec.Questions {
+		answer, ok := allAnswers[question.Variable]
+		if !ok {
+			answer = question.Default
+		}
+		val, err := builder.ConvertSimple(question.Type, answer, builder.Create)
+		if err != nil {
+			return nil, err
+		}
+		keyParts := strings.Split(question.Variable, ".")
+		values.PutValue(dataFromTemplate, val, keyParts...)
+	}
+	return dataFromTemplate, nil
+}
+
+func hasTemplate(data map[string]interface{}) bool {
+	templateID := convert.ToString(data[managementv3.ClusterSpecFieldClusterTemplateID])
+	if templateID != "" {
+		return true
+	}
+	return false
+}
+
+func (r *Store) validateTemplateInput(data map[string]interface{}, isUpdate bool) (*v3.ClusterTemplateRevision, error) {
+
+	if !isUpdate {
+		//if data also has rkeconfig, error out on create
+		rkeConfig, ok := values.GetValue(data, "rancherKubernetesEngineConfig")
+		if ok && rkeConfig != nil {
+			return nil, fmt.Errorf("cannot set rancherKubernetesEngineConfig and clusterTemplateId both")
+		}
+	}
+
+	var templateID, templateRevID string
+	templateIDStr := convert.ToString(data[managementv3.ClusterSpecFieldClusterTemplateID])
+
+	splitID := strings.Split(templateIDStr, ":")
+	if len(splitID) == 2 {
+		templateID = splitID[1]
+	}
+
+	templateRevIDStr := convert.ToString(data[managementv3.ClusterSpecFieldClusterTemplateRevisionID])
+	if templateRevIDStr == "" {
+		return nil, fmt.Errorf("template revision is not provided")
+	}
+
+	splitID = strings.Split(templateRevIDStr, ":")
+	if len(splitID) == 2 {
+		templateRevID = splitID[1]
+	}
+
+	clusterTemplate, err := r.ClusterTemplateLister.Get(namespace.GlobalNamespace, templateID)
+	if err != nil {
+		return nil, err
+	}
+
+	if clusterTemplate.Spec.Enabled != nil && !(*clusterTemplate.Spec.Enabled) {
+		return nil, fmt.Errorf("cannot create cluster, cluster template is disabled")
+	}
+
+	clusterTemplateRevision, err := r.ClusterTemplateRevisionLister.Get(namespace.GlobalNamespace, templateRevID)
+	if err != nil {
+		return nil, err
+	}
+
+	if clusterTemplateRevision.Spec.Enabled != nil && !(*clusterTemplateRevision.Spec.Enabled) {
+		return nil, fmt.Errorf("cannot create cluster, cluster template revision is disabled")
+	}
+
+	if !strings.EqualFold(clusterTemplateRevision.Spec.ClusterTemplateName, templateIDStr) {
+		return nil, fmt.Errorf("cannot create cluster, cluster template revision does not belong to clusterTemplate chosen")
+	}
+
+	return clusterTemplateRevision, nil
+
 }
 
 func setInitialConditions(data map[string]interface{}) error {
@@ -254,7 +367,34 @@ func (r *Store) Update(apiContext *types.APIContext, schema *types.Schema, data 
 		}
 	}
 
-	setKubernetesVersion(data)
+	//check if template is passed. if yes, load template data
+	if hasTemplate(data) {
+		if existingCluster[managementv3.ClusterSpecFieldClusterTemplateID] == "" {
+			return nil, fmt.Errorf("this cluster is not created using a template, cannot update it to use a template now")
+		}
+
+		updatedTemplateID := convert.ToString(data[managementv3.ClusterSpecFieldClusterTemplateID])
+		templateID := convert.ToString(existingCluster[managementv3.ClusterSpecFieldClusterTemplateID])
+		if !strings.EqualFold(updatedTemplateID, templateID) {
+			return nil, fmt.Errorf("cannot update cluster, cluster cannot be changed to a new template")
+		}
+
+		clusterTemplateRevision, err := r.validateTemplateInput(data, true)
+		if err != nil {
+			return nil, err
+		}
+		clusterUpdate, err := loadDataFromTemplate(clusterTemplateRevision, data)
+		if err != nil {
+			return nil, err
+		}
+
+		data = clusterUpdate
+	}
+
+	err = setKubernetesVersion(data)
+	if err != nil {
+		return nil, err
+	}
 
 	data, err = r.transposeDynamicFieldToGenericConfig(data)
 	if err != nil {
@@ -333,17 +473,51 @@ func canUseClusterName(apiContext *types.APIContext, requestedName string) error
 	return nil
 }
 
-func setKubernetesVersion(data map[string]interface{}) {
+func setKubernetesVersion(data map[string]interface{}) error {
 	rkeConfig, ok := values.GetValue(data, "rancherKubernetesEngineConfig")
-
 	if ok && rkeConfig != nil {
 		k8sVersion := values.GetValueN(data, "rancherKubernetesEngineConfig", "kubernetesVersion")
 		if k8sVersion == nil || k8sVersion == "" {
 			//set k8s version to system default on the spec
 			defaultVersion := settings.KubernetesVersion.Get()
 			values.PutValue(data, defaultVersion, "rancherKubernetesEngineConfig", "kubernetesVersion")
+		} else {
+			//if k8s version is already of rancher version form, noop
+			//if k8s version is of form 1.14.x, figure out the latest
+			k8sVersionRequested := convert.ToString(k8sVersion)
+			if !strings.Contains(k8sVersionRequested, "-rancher") {
+				translatedVersion, err := getSupportedK8sVersion(k8sVersionRequested)
+				if err != nil {
+					return httperror.WrapAPIError(err, httperror.ServerError, "")
+				}
+				if translatedVersion == "" {
+					return httperror.NewAPIError(httperror.ServerError, fmt.Sprintf("Requested kubernetesVersion %v is not supported currently", k8sVersionRequested))
+				}
+				values.PutValue(data, translatedVersion, "rancherKubernetesEngineConfig", "kubernetesVersion")
+			}
 		}
 	}
+	return nil
+}
+
+func getSupportedK8sVersion(k8sVersionRequest string) (string, error) {
+
+	supportedVersions := strings.Split(settings.KubernetesVersionsCurrent.Get(), ",")
+	range1, err := semver.ParseRange("=" + k8sVersionRequest)
+	if err != nil {
+		return "", fmt.Errorf("Requested kubernetesVersion %v is not of valid semver [major.minor.patch] format", k8sVersionRequest)
+	}
+
+	for _, v := range supportedVersions {
+		semv, err := semver.ParseTolerant(strings.Split(v, "-rancher")[0])
+		if err != nil {
+			return "", fmt.Errorf("Semver translation failed for the current K8bernetes Version %v, err: %v", v, err)
+		}
+		if range1(semv) {
+			return v, nil
+		}
+	}
+	return "", nil
 }
 
 func validateNetworkFlag(data map[string]interface{}, create bool) error {

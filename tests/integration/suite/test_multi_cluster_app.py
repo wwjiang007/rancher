@@ -1,14 +1,20 @@
-from .common import random_str
+from .common import random_str, check_subject_in_rb
 from rancher import ApiError
 from .conftest import wait_until, wait_for
 import time
+import pytest
+import kubernetes
+
+roles_resource = 'roles'
+projects_resource = 'projects'
+members_resource = 'members'
 
 
 def test_multiclusterapp_create_no_roles(admin_mc, admin_pc, remove_resource,
                                          user_factory):
     client = admin_mc.client
     mcapp_name = random_str()
-    temp_ver = "cattle-global-data:library-wordpress-2.1.10"
+    temp_ver = "cattle-global-data:library-wordpress-1.0.5"
     targets = [{"projectId": admin_pc.project.id}]
     # should not be able to create without passing roles
     try:
@@ -22,7 +28,7 @@ def test_multiclusterapp_create_no_roles(admin_mc, admin_pc, remove_resource,
 def test_mutliclusterapp_invalid_project(admin_mc):
     client = admin_mc.client
     mcapp_name = random_str()
-    temp_ver = "cattle-global-data:library-wordpress-2.1.10"
+    temp_ver = "cattle-global-data:library-wordpress-1.0.5"
     targets = [{"projectId": "abc:def"}]
     try:
         client.create_multi_cluster_app(name=mcapp_name,
@@ -32,11 +38,13 @@ def test_mutliclusterapp_invalid_project(admin_mc):
         assert e.error.status == 422
 
 
+@pytest.mark.nonparallel
 def test_multiclusterapp_create_with_members(admin_mc, admin_pc,
-                                             user_factory, remove_resource):
+                                             user_factory, remove_resource,
+                                             ):
     client = admin_mc.client
     mcapp_name = random_str()
-    temp_ver = "cattle-global-data:library-wordpress-2.1.10"
+    temp_ver = "cattle-global-data:library-wordpress-1.0.5"
 
     targets = [{"projectId": admin_pc.project.id}]
 
@@ -65,17 +73,52 @@ def test_multiclusterapp_create_with_members(admin_mc, admin_pc,
     mcapp = um_client.by_id_multi_cluster_app(id)
     assert mcapp is not None
 
+    # member should also get access to the mcapp revision
+    if mcapp['status']['revisionId'] != '':
+        mcapp_revision_id = "cattle-global-data:" + \
+                            mcapp['status']['revisionId']
+        mcr = um_client.\
+            by_id_multi_cluster_app_revision(mcapp_revision_id)
+        assert mcr is not None
+
+    # user who's not a member shouldn't get access
     unm_client = user_not_member.client
     try:
         unm_client.by_id_multi_cluster_app(id)
     except ApiError as e:
         assert e.error.status == 403
 
+    # add the special char * to indicate sharing of resource with all
+    # authenticated users
+    new_members = [{"userPrincipalId": "local://"+user_member.user.id,
+                   "accessType": "read-only"}, {"groupPrincipalId": "*"}]
+    client.update(mcapp, members=new_members, roles=roles)
+
+    # now user_not_member should be able to access this mcapp without
+    # being explicitly added
+    rbac = kubernetes.client.RbacAuthorizationV1Api(admin_mc.k8s_client)
+    split = mcapp.id.split(":")
+    name = split[1]
+    rb_name = name + "-m-r"
+    wait_for(lambda: check_subject_in_rb(rbac, 'cattle-global-data',
+                                         'system:authenticated', rb_name),
+             timeout=60, fail_handler=lambda:
+             'failed to check updated rolebinding')
+
+    mcapp = user_not_member.client.by_id_multi_cluster_app(id)
+    assert mcapp is not None
+
+    # even newly created users should be able to access this mcapp
+    new_user = user_factory()
+    remove_resource(new_user)
+    mcapp = new_user.client.by_id_multi_cluster_app(id)
+    assert mcapp is not None
+
 
 def test_multiclusterapp_admin_create(admin_mc, admin_pc, remove_resource):
     client = admin_mc.client
     mcapp_name = random_str()
-    temp_ver = "cattle-global-data:library-wordpress-2.1.10"
+    temp_ver = "cattle-global-data:library-wordpress-1.0.5"
     targets = [{"projectId": admin_pc.project.id}]
     roles = ["cluster-owner", "project-member"]
     # roles check should be relaxed for admin
@@ -98,7 +141,7 @@ def test_multiclusterapp_cluster_owner_create(admin_mc, admin_pc,
         userId=cowner.user.id)
     remove_resource(crtb_owner)
     wait_until(rtb_cb(client, crtb_owner))
-    temp_ver = "cattle-global-data:library-wordpress-2.1.10"
+    temp_ver = "cattle-global-data:library-wordpress-1.0.5"
     targets = [{"projectId": admin_pc.project.id}]
     roles = ["cluster-owner", "project-member"]
     # user isn't explicitly added as project-member, but this check should be
@@ -122,7 +165,7 @@ def test_multiclusterapp_project_owner_create(admin_mc, admin_pc,
         userId=powner.user.id)
     remove_resource(prtb_owner)
     wait_until(rtb_cb(client, prtb_owner))
-    temp_ver = "cattle-global-data:library-wordpress-2.1.10"
+    temp_ver = "cattle-global-data:library-wordpress-1.0.5"
     targets = [{"projectId": admin_pc.project.id}]
     roles = ["project-member"]
     # user isn't explicitly added as project-member, but this check should be
@@ -139,7 +182,7 @@ def test_multiclusterapp_user_create(admin_mc, admin_pc, remove_resource,
                                      user_factory):
     client = admin_mc.client
     mcapp_name = random_str()
-    temp_ver = "cattle-global-data:library-wordpress-2.1.10"
+    temp_ver = "cattle-global-data:library-wordpress-1.0.5"
     targets = [{"projectId": admin_pc.project.id}]
     # make regular user cluster-owner and project-owner in the cluster and
     # it's project
@@ -195,7 +238,7 @@ def test_multiclusterapp_admin_update_roles(admin_mc, admin_pc,
                                             remove_resource):
     client = admin_mc.client
     mcapp_name = random_str()
-    temp_ver = "cattle-global-data:library-wordpress-2.1.10"
+    temp_ver = "cattle-global-data:library-wordpress-1.0.5"
     targets = [{"projectId": admin_pc.project.id}]
     roles = ["project-member"]
     mcapp1 = client.create_multi_cluster_app(name=mcapp_name,
@@ -211,14 +254,14 @@ def test_multiclusterapp_admin_update_roles(admin_mc, admin_pc,
     new_roles = ["cluster-owner", "project-member"]
     client.update(mcapp1, roles=new_roles)
     wait_for(lambda: check_updated_roles(admin_mc, mcapp_name, new_roles),
-             timeout=60, fail_handler=roles_fail_handler())
+             timeout=60, fail_handler=fail_handler(roles_resource))
 
 
 def test_multiclusterapp_user_update_roles(admin_mc, admin_pc, remove_resource,
                                            user_factory):
     client = admin_mc.client
     mcapp_name = random_str()
-    temp_ver = "cattle-global-data:library-wordpress-2.1.10"
+    temp_ver = "cattle-global-data:library-wordpress-1.0.5"
     targets = [{"projectId": admin_pc.project.id}]
     # create mcapp as admin, passing "cluster-owner" role
     roles = ["cluster-owner"]
@@ -257,13 +300,13 @@ def test_multiclusterapp_user_update_roles(admin_mc, admin_pc, remove_resource,
     # now user should be able to add project-member role
     user.client.update(mcapp1, roles=new_roles)
     wait_for(lambda: check_updated_roles(admin_mc, mcapp_name, new_roles),
-             timeout=60, fail_handler=roles_fail_handler())
+             timeout=60, fail_handler=fail_handler(roles_resource))
 
 
 def test_admin_access(admin_mc, admin_pc, user_factory, remove_resource):
     client = admin_mc.client
     mcapp_name = random_str()
-    temp_ver = "cattle-global-data:library-wordpress-2.1.10"
+    temp_ver = "cattle-global-data:library-wordpress-1.0.5"
     targets = [{"projectId": admin_pc.project.id}]
     user = user_factory()
     remove_resource(user)
@@ -282,13 +325,13 @@ def test_admin_access(admin_mc, admin_pc, user_factory, remove_resource):
     client.update(mcapp1, roles=["cluster-owner"])
     wait_for(lambda: check_updated_roles(admin_mc, mcapp_name,
                                          ["cluster-owner"]), timeout=60,
-             fail_handler=roles_fail_handler())
+             fail_handler=fail_handler(roles_resource))
 
 
 def test_add_projects(admin_mc, admin_pc, admin_cc, remove_resource):
     client = admin_mc.client
     mcapp_name = random_str()
-    temp_ver = "cattle-global-data:library-wordpress-2.1.10"
+    temp_ver = "cattle-global-data:library-wordpress-1.0.5"
     targets = [{"projectId": admin_pc.project.id}]
     mcapp1 = client.\
         create_multi_cluster_app(name=mcapp_name,
@@ -306,13 +349,13 @@ def test_add_projects(admin_mc, admin_pc, admin_cc, remove_resource):
     new_projects = [admin_pc.project.id, p.id]
     wait_for(lambda: check_updated_projects(admin_mc, mcapp_name,
                                             new_projects), timeout=60,
-             fail_handler=projects_fail_handler)
+             fail_handler=fail_handler(projects_resource))
 
 
 def test_remove_projects(admin_mc, admin_pc, admin_cc, remove_resource):
     client = admin_mc.client
     mcapp_name = random_str()
-    temp_ver = "cattle-global-data:library-wordpress-2.1.10"
+    temp_ver = "cattle-global-data:library-wordpress-1.0.5"
     p = client.create_project(name='test-' + random_str(),
                               clusterId=admin_cc.cluster.id)
     remove_resource(p)
@@ -330,9 +373,39 @@ def test_remove_projects(admin_mc, admin_pc, admin_cc, remove_resource):
     new_projects = [admin_pc.project.id]
     wait_for(lambda: check_updated_projects(admin_mc, mcapp_name,
                                             new_projects), timeout=60,
-             fail_handler=projects_fail_handler)
+             fail_handler=fail_handler(projects_resource))
 
 
+def test_multiclusterapp_revision_access(admin_mc, admin_pc, remove_resource,
+                                         user_factory):
+    client = admin_mc.client
+    mcapp_name = random_str()
+    temp_ver = "cattle-global-data:library-mysql-0.3.8"
+    targets = [{"projectId": admin_pc.project.id}]
+    user = user_factory()
+    remove_resource(user)
+    user_client = user.client
+    # assign user to local cluster as project-member
+    prtb_member = client.create_project_role_template_binding(
+        projectId=admin_pc.project.id,
+        roleTemplateId="project-member",
+        userId=user.user.id)
+
+    remove_resource(prtb_member)
+    wait_until(rtb_cb(client, prtb_member))
+    roles = ["project-member"]
+    mcapp1 = user_client.create_multi_cluster_app(name=mcapp_name,
+                                                  templateVersionId=temp_ver,
+                                                  targets=targets,
+                                                  roles=roles)
+    remove_resource(mcapp1)
+    wait_for_app(admin_pc, mcapp_name, 60)
+
+    mcapp_revisions = user_client.list_multi_cluster_app_revision()
+    assert len(mcapp_revisions) == 1
+
+
+@pytest.mark.skip(reason='flaky test maybe, skipping for now')
 def test_app_upgrade_mcapp_roles_change(admin_mc, admin_pc,
                                         remove_resource):
     client = admin_mc.client
@@ -417,9 +490,5 @@ def check_updated_roles(admin_mc, mcapp_name, roles):
     return False
 
 
-def projects_fail_handler():
-    return "failed waiting for multiclusterapp projects to get updated"
-
-
-def roles_fail_handler():
-    return "failed waiting for multiclusterapp roles to get updated"
+def fail_handler(resource):
+    return "failed waiting for multiclusterapp " + resource + " to get updated"

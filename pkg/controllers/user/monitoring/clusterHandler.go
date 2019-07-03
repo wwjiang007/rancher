@@ -9,6 +9,7 @@ import (
 
 	"github.com/pkg/errors"
 	kcluster "github.com/rancher/kontainer-engine/cluster"
+	"github.com/rancher/rancher/pkg/app/utils"
 	"github.com/rancher/rancher/pkg/controllers/user/nslabels"
 	"github.com/rancher/rancher/pkg/monitoring"
 	"github.com/rancher/rancher/pkg/node"
@@ -17,7 +18,7 @@ import (
 	"github.com/rancher/rke/pki"
 	corev1 "github.com/rancher/types/apis/core/v1"
 	mgmtv3 "github.com/rancher/types/apis/management.cattle.io/v3"
-	"github.com/rancher/types/apis/project.cattle.io/v3"
+	v3 "github.com/rancher/types/apis/project.cattle.io/v3"
 	k8scorev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -156,12 +157,12 @@ func (ch *clusterHandler) doSync(cluster *mgmtv3.Cluster) error {
 }
 
 func (ch *clusterHandler) ensureAppProjectName(clusterID, appTargetNamespace string) (string, error) {
-	appDeployProjectID, err := monitoring.GetSystemProjectID(ch.app.cattleProjectClient)
+	appDeployProjectID, err := utils.GetSystemProjectID(ch.app.projectLister)
 	if err != nil {
 		return "", err
 	}
 
-	appProjectName, err := monitoring.EnsureAppProjectName(ch.app.agentNamespaceClient, appDeployProjectID, clusterID, appTargetNamespace)
+	appProjectName, err := utils.EnsureAppProjectName(ch.app.agentNamespaceClient, appDeployProjectID, clusterID, appTargetNamespace)
 	if err != nil {
 		return "", err
 	}
@@ -280,13 +281,11 @@ func (ch *clusterHandler) deployApp(appName, appTargetNamespace string, appProje
 	mustAppAnswers := map[string]string{
 		"enabled": "false",
 
-		"exporter-coredns.enabled":  "false",
 		"exporter-coredns.apiGroup": monitoring.APIVersion.Group,
 
 		"exporter-kube-controller-manager.enabled":  "false",
 		"exporter-kube-controller-manager.apiGroup": monitoring.APIVersion.Group,
 
-		"exporter-kube-dns.enabled":  "false",
 		"exporter-kube-dns.apiGroup": monitoring.APIVersion.Group,
 
 		"exporter-kube-etcd.enabled":  "false",
@@ -391,7 +390,7 @@ func (ch *clusterHandler) deployApp(appName, appTargetNamespace string, appProje
 		},
 	}
 
-	_, err = monitoring.DeployApp(ch.app.cattleAppClient, appDeployProjectID, app, false)
+	_, err = utils.DeployApp(ch.app.cattleAppClient, appDeployProjectID, app, false)
 	if err != nil {
 		return nil, err
 	}

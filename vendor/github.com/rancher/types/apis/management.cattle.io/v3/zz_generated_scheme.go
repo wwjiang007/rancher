@@ -103,6 +103,8 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&ListenConfigList{},
 		&Setting{},
 		&SettingList{},
+		&Feature{},
+		&FeatureList{},
 		&ClusterAlert{},
 		&ClusterAlertList{},
 		&ProjectAlert{},
@@ -135,6 +137,8 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&KontainerDriverList{},
 		&EtcdBackup{},
 		&EtcdBackupList{},
+		&ClusterScan{},
+		&ClusterScanList{},
 		&MonitorMetric{},
 		&MonitorMetricList{},
 		&ClusterMonitorGraph{},
@@ -143,6 +147,10 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&ProjectMonitorGraphList{},
 		&CloudCredential{},
 		&CloudCredentialList{},
+		&ClusterTemplate{},
+		&ClusterTemplateList{},
+		&ClusterTemplateRevision{},
+		&ClusterTemplateRevisionList{},
 	)
 	metav1.AddToGroupVersion(scheme, SchemeGroupVersion)
 	return nil

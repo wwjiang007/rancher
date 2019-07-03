@@ -15,7 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 
 	"github.com/rancher/norman/types"
-	"github.com/rancher/types/apis/core/v1"
+	v1 "github.com/rancher/types/apis/core/v1"
 	managementschema "github.com/rancher/types/apis/management.cattle.io/v3/schema"
 	projectschema "github.com/rancher/types/apis/project.cattle.io/v3/schema"
 	"github.com/sirupsen/logrus"
@@ -80,7 +80,7 @@ func SetPasswordStore(schemas *types.Schemas, secretStore v1.SecretInterface, ns
 			pwdStore.Fields[id] = data
 			schema.Store = pwdStore
 			ans, _ := json.Marshal(data)
-			logrus.Infof("password fields %s", string(ans))
+			logrus.Debugf("password fields %s", string(ans))
 		}
 	}
 }

@@ -66,12 +66,12 @@ func (d *BaseDriver) Remove() error {
 	return nil
 }
 
-func (d *BaseDriver) Stage() error {
+func (d *BaseDriver) Stage(forceUpdate bool) error {
 	if err := d.getError(); err != nil {
 		return err
 	}
 
-	return d.setError(d.stage())
+	return d.setError(d.stage(forceUpdate))
 }
 
 func (d *BaseDriver) setError(err error) error {
@@ -101,7 +101,7 @@ func (d *BaseDriver) ClearError() {
 	os.Remove(errFile)
 }
 
-func (d *BaseDriver) stage() error {
+func (d *BaseDriver) stage(forceUpdate bool) error {
 	if d.Builtin {
 		return nil
 	}
@@ -109,7 +109,7 @@ func (d *BaseDriver) stage() error {
 	cacheFilePrefix := d.cacheFile()
 
 	driverName, err := isInstalled(cacheFilePrefix)
-	if err != nil || driverName != "" {
+	if !forceUpdate && err != nil || driverName != "" {
 		d.DriverName = driverName
 		return err
 	}
@@ -152,6 +152,9 @@ func (d *BaseDriver) stage() error {
 	return nil
 }
 
+// Exists will return true if the executable binary for the driver can be found
+// and the cache file exists (in case of upgrades the binary will match but
+// the cache will not yet exist)
 func (d *BaseDriver) Exists() bool {
 	if d.DriverName == "" {
 		return false
@@ -159,8 +162,11 @@ func (d *BaseDriver) Exists() bool {
 	if d.Builtin {
 		return true
 	}
-	binaryPath := path.Join(binDir(), d.DriverName)
-	_, err := os.Stat(binaryPath)
+	_, err := os.Stat(d.binName())
+	if err == nil {
+		// The executable is there but do it come from the right version?
+		_, err = os.Stat(d.srcBinName())
+	}
 	return err == nil
 }
 
@@ -261,6 +267,14 @@ func (d *BaseDriver) copyBinary(cacheFile, input string) (string, error) {
 	return driverName, ioutil.WriteFile(cacheFile, []byte(driverName), 0644)
 }
 
+// binName is the full path to the binary executable. This does not take in
+// account the version of the binary
+func (d *BaseDriver) binName() string {
+	return path.Join(binDir(), d.DriverName)
+}
+
+// srcBinName is the full path of the cached/hashed binary executable. This takes
+// in account the version of the binary
 func (d *BaseDriver) srcBinName() string {
 	return d.cacheFile() + "-" + d.DriverName
 }

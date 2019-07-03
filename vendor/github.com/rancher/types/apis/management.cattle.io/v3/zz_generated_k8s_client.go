@@ -55,6 +55,7 @@ type Interface interface {
 	ProjectLoggingsGetter
 	ListenConfigsGetter
 	SettingsGetter
+	FeaturesGetter
 	ClusterAlertsGetter
 	ProjectAlertsGetter
 	NotifiersGetter
@@ -71,10 +72,13 @@ type Interface interface {
 	GlobalDNSProvidersGetter
 	KontainerDriversGetter
 	EtcdBackupsGetter
+	ClusterScansGetter
 	MonitorMetricsGetter
 	ClusterMonitorGraphsGetter
 	ProjectMonitorGraphsGetter
 	CloudCredentialsGetter
+	ClusterTemplatesGetter
+	ClusterTemplateRevisionsGetter
 }
 
 type Clients struct {
@@ -115,6 +119,7 @@ type Clients struct {
 	ProjectLogging                          ProjectLoggingClient
 	ListenConfig                            ListenConfigClient
 	Setting                                 SettingClient
+	Feature                                 FeatureClient
 	ClusterAlert                            ClusterAlertClient
 	ProjectAlert                            ProjectAlertClient
 	Notifier                                NotifierClient
@@ -131,10 +136,13 @@ type Clients struct {
 	GlobalDNSProvider                       GlobalDNSProviderClient
 	KontainerDriver                         KontainerDriverClient
 	EtcdBackup                              EtcdBackupClient
+	ClusterScan                             ClusterScanClient
 	MonitorMetric                           MonitorMetricClient
 	ClusterMonitorGraph                     ClusterMonitorGraphClient
 	ProjectMonitorGraph                     ProjectMonitorGraphClient
 	CloudCredential                         CloudCredentialClient
+	ClusterTemplate                         ClusterTemplateClient
+	ClusterTemplateRevision                 ClusterTemplateRevisionClient
 }
 
 type Client struct {
@@ -177,6 +185,7 @@ type Client struct {
 	projectLoggingControllers                          map[string]ProjectLoggingController
 	listenConfigControllers                            map[string]ListenConfigController
 	settingControllers                                 map[string]SettingController
+	featureControllers                                 map[string]FeatureController
 	clusterAlertControllers                            map[string]ClusterAlertController
 	projectAlertControllers                            map[string]ProjectAlertController
 	notifierControllers                                map[string]NotifierController
@@ -193,10 +202,13 @@ type Client struct {
 	globalDnsProviderControllers                       map[string]GlobalDNSProviderController
 	kontainerDriverControllers                         map[string]KontainerDriverController
 	etcdBackupControllers                              map[string]EtcdBackupController
+	clusterScanControllers                             map[string]ClusterScanController
 	monitorMetricControllers                           map[string]MonitorMetricController
 	clusterMonitorGraphControllers                     map[string]ClusterMonitorGraphController
 	projectMonitorGraphControllers                     map[string]ProjectMonitorGraphController
 	cloudCredentialControllers                         map[string]CloudCredentialController
+	clusterTemplateControllers                         map[string]ClusterTemplateController
+	clusterTemplateRevisionControllers                 map[string]ClusterTemplateRevisionController
 }
 
 func Factory(ctx context.Context, config rest.Config) (context.Context, controller.Starter, error) {
@@ -337,6 +349,9 @@ func NewClientsFromInterface(iface Interface) *Clients {
 		Setting: &settingClient2{
 			iface: iface.Settings(""),
 		},
+		Feature: &featureClient2{
+			iface: iface.Features(""),
+		},
 		ClusterAlert: &clusterAlertClient2{
 			iface: iface.ClusterAlerts(""),
 		},
@@ -385,6 +400,9 @@ func NewClientsFromInterface(iface Interface) *Clients {
 		EtcdBackup: &etcdBackupClient2{
 			iface: iface.EtcdBackups(""),
 		},
+		ClusterScan: &clusterScanClient2{
+			iface: iface.ClusterScans(""),
+		},
 		MonitorMetric: &monitorMetricClient2{
 			iface: iface.MonitorMetrics(""),
 		},
@@ -396,6 +414,12 @@ func NewClientsFromInterface(iface Interface) *Clients {
 		},
 		CloudCredential: &cloudCredentialClient2{
 			iface: iface.CloudCredentials(""),
+		},
+		ClusterTemplate: &clusterTemplateClient2{
+			iface: iface.ClusterTemplates(""),
+		},
+		ClusterTemplateRevision: &clusterTemplateRevisionClient2{
+			iface: iface.ClusterTemplateRevisions(""),
 		},
 	}
 }
@@ -448,6 +472,7 @@ func NewForConfig(config rest.Config) (Interface, error) {
 		projectLoggingControllers:                          map[string]ProjectLoggingController{},
 		listenConfigControllers:                            map[string]ListenConfigController{},
 		settingControllers:                                 map[string]SettingController{},
+		featureControllers:                                 map[string]FeatureController{},
 		clusterAlertControllers:                            map[string]ClusterAlertController{},
 		projectAlertControllers:                            map[string]ProjectAlertController{},
 		notifierControllers:                                map[string]NotifierController{},
@@ -464,10 +489,13 @@ func NewForConfig(config rest.Config) (Interface, error) {
 		globalDnsProviderControllers:                       map[string]GlobalDNSProviderController{},
 		kontainerDriverControllers:                         map[string]KontainerDriverController{},
 		etcdBackupControllers:                              map[string]EtcdBackupController{},
+		clusterScanControllers:                             map[string]ClusterScanController{},
 		monitorMetricControllers:                           map[string]MonitorMetricController{},
 		clusterMonitorGraphControllers:                     map[string]ClusterMonitorGraphController{},
 		projectMonitorGraphControllers:                     map[string]ProjectMonitorGraphController{},
 		cloudCredentialControllers:                         map[string]CloudCredentialController{},
+		clusterTemplateControllers:                         map[string]ClusterTemplateController{},
+		clusterTemplateRevisionControllers:                 map[string]ClusterTemplateRevisionController{},
 	}, nil
 }
 
@@ -938,6 +966,19 @@ func (c *Client) Settings(namespace string) SettingInterface {
 	}
 }
 
+type FeaturesGetter interface {
+	Features(namespace string) FeatureInterface
+}
+
+func (c *Client) Features(namespace string) FeatureInterface {
+	objectClient := objectclient.NewObjectClient(namespace, c.restClient, &FeatureResource, FeatureGroupVersionKind, featureFactory{})
+	return &featureClient{
+		ns:           namespace,
+		client:       c,
+		objectClient: objectClient,
+	}
+}
+
 type ClusterAlertsGetter interface {
 	ClusterAlerts(namespace string) ClusterAlertInterface
 }
@@ -1146,6 +1187,19 @@ func (c *Client) EtcdBackups(namespace string) EtcdBackupInterface {
 	}
 }
 
+type ClusterScansGetter interface {
+	ClusterScans(namespace string) ClusterScanInterface
+}
+
+func (c *Client) ClusterScans(namespace string) ClusterScanInterface {
+	objectClient := objectclient.NewObjectClient(namespace, c.restClient, &ClusterScanResource, ClusterScanGroupVersionKind, clusterScanFactory{})
+	return &clusterScanClient{
+		ns:           namespace,
+		client:       c,
+		objectClient: objectClient,
+	}
+}
+
 type MonitorMetricsGetter interface {
 	MonitorMetrics(namespace string) MonitorMetricInterface
 }
@@ -1192,6 +1246,32 @@ type CloudCredentialsGetter interface {
 func (c *Client) CloudCredentials(namespace string) CloudCredentialInterface {
 	objectClient := objectclient.NewObjectClient(namespace, c.restClient, &CloudCredentialResource, CloudCredentialGroupVersionKind, cloudCredentialFactory{})
 	return &cloudCredentialClient{
+		ns:           namespace,
+		client:       c,
+		objectClient: objectClient,
+	}
+}
+
+type ClusterTemplatesGetter interface {
+	ClusterTemplates(namespace string) ClusterTemplateInterface
+}
+
+func (c *Client) ClusterTemplates(namespace string) ClusterTemplateInterface {
+	objectClient := objectclient.NewObjectClient(namespace, c.restClient, &ClusterTemplateResource, ClusterTemplateGroupVersionKind, clusterTemplateFactory{})
+	return &clusterTemplateClient{
+		ns:           namespace,
+		client:       c,
+		objectClient: objectClient,
+	}
+}
+
+type ClusterTemplateRevisionsGetter interface {
+	ClusterTemplateRevisions(namespace string) ClusterTemplateRevisionInterface
+}
+
+func (c *Client) ClusterTemplateRevisions(namespace string) ClusterTemplateRevisionInterface {
+	objectClient := objectclient.NewObjectClient(namespace, c.restClient, &ClusterTemplateRevisionResource, ClusterTemplateRevisionGroupVersionKind, clusterTemplateRevisionFactory{})
+	return &clusterTemplateRevisionClient{
 		ns:           namespace,
 		client:       c,
 		objectClient: objectClient,

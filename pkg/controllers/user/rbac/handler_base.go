@@ -9,7 +9,7 @@ import (
 	"github.com/rancher/norman/objectclient"
 	"github.com/rancher/norman/types/convert"
 	typescorev1 "github.com/rancher/types/apis/core/v1"
-	"github.com/rancher/types/apis/management.cattle.io/v3"
+	v3 "github.com/rancher/types/apis/management.cattle.io/v3"
 	typesrbacv1 "github.com/rancher/types/apis/rbac.authorization.k8s.io/v1"
 	"github.com/rancher/types/config"
 	"github.com/sirupsen/logrus"
@@ -394,8 +394,10 @@ func getPRTBProjectAndSubjectKey(prtb *v3.ProjectRoleTemplateBinding) string {
 		name = prtb.UserPrincipalName
 	} else if prtb.GroupName != "" {
 		name = prtb.GroupName
-	} else {
+	} else if prtb.GroupPrincipalName != "" {
 		name = prtb.GroupPrincipalName
+	} else if prtb.ServiceAccount != "" {
+		name = prtb.ServiceAccount
 	}
 	return prtb.ProjectName + "." + name
 }

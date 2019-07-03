@@ -3,6 +3,9 @@ package monitoring
 import (
 	"fmt"
 	"reflect"
+	"strings"
+
+	"github.com/rancher/rancher/pkg/app/utils"
 
 	"github.com/pkg/errors"
 	"github.com/rancher/rancher/pkg/monitoring"
@@ -150,17 +153,13 @@ func deploySystemMonitor(cluster *mgmtv3.Cluster, app *appHandler) (backErr erro
 	appName, appTargetNamespace := monitoring.SystemMonitoringInfo()
 
 	appCatalogID := settings.SystemMonitoringCatalogID.Get()
-	err := monitoring.DetectAppCatalogExistence(appCatalogID, app.cattleTemplateVersionClient)
-	if err != nil {
-		return errors.Wrapf(err, "failed to ensure catalog %q", appCatalogID)
-	}
 
-	appDeployProjectID, err := monitoring.GetSystemProjectID(app.cattleProjectClient)
+	appDeployProjectID, err := utils.GetSystemProjectID(app.projectLister)
 	if err != nil {
 		return errors.Wrap(err, "failed to get System Project ID")
 	}
 
-	appProjectName, err := monitoring.EnsureAppProjectName(app.agentNamespaceClient, appDeployProjectID, cluster.Name, appTargetNamespace)
+	appProjectName, err := utils.EnsureAppProjectName(app.agentNamespaceClient, appDeployProjectID, cluster.Name, appTargetNamespace)
 	if err != nil {
 		return errors.Wrap(err, "failed to ensure monitoring project name")
 	}
@@ -169,6 +168,23 @@ func deploySystemMonitor(cluster *mgmtv3.Cluster, app *appHandler) (backErr erro
 		"enabled":      "true",
 		"apiGroup":     monitoring.APIVersion.Group,
 		"nameOverride": "prometheus-operator",
+	}
+
+	mustAppAnswers := map[string]string{
+		"operator.apiGroup":     monitoring.APIVersion.Group,
+		"operator.nameOverride": "prometheus-operator",
+	}
+
+	// take operator answers from overwrite answers
+	for ansKey, ansVal := range monitoring.GetOverwroteAppAnswers(cluster.Annotations) {
+		if strings.HasPrefix(ansKey, "operator.") {
+			appAnswers[ansKey] = ansVal
+		}
+	}
+
+	// cannot overwrite mustAppAnswers
+	for mustKey, mustVal := range mustAppAnswers {
+		appAnswers[mustKey] = mustVal
 	}
 
 	creator, err := app.systemAccountManager.GetSystemUser(cluster.Name)
@@ -207,7 +223,7 @@ func deploySystemMonitor(cluster *mgmtv3.Cluster, app *appHandler) (backErr erro
 		forceRedeploy = true
 	}
 
-	_, err = monitoring.DeployApp(app.cattleAppClient, appDeployProjectID, targetApp, forceRedeploy)
+	_, err = utils.DeployApp(app.cattleAppClient, appDeployProjectID, targetApp, forceRedeploy)
 	if err != nil {
 		return errors.Wrap(err, "failed to ensure prometheus operator app")
 	}

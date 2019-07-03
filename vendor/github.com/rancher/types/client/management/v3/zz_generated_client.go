@@ -41,6 +41,7 @@ type Client struct {
 	ProjectLogging                          ProjectLoggingOperations
 	ListenConfig                            ListenConfigOperations
 	Setting                                 SettingOperations
+	Feature                                 FeatureOperations
 	ClusterAlert                            ClusterAlertOperations
 	ProjectAlert                            ProjectAlertOperations
 	Notifier                                NotifierOperations
@@ -57,11 +58,14 @@ type Client struct {
 	GlobalDNSProvider                       GlobalDNSProviderOperations
 	KontainerDriver                         KontainerDriverOperations
 	EtcdBackup                              EtcdBackupOperations
+	ClusterScan                             ClusterScanOperations
 	MonitorMetric                           MonitorMetricOperations
 	ClusterMonitorGraph                     ClusterMonitorGraphOperations
 	ProjectMonitorGraph                     ProjectMonitorGraphOperations
 	CloudCredential                         CloudCredentialOperations
 	ManagementSecret                        ManagementSecretOperations
+	ClusterTemplate                         ClusterTemplateOperations
+	ClusterTemplateRevision                 ClusterTemplateRevisionOperations
 }
 
 func NewClient(opts *clientbase.ClientOpts) (*Client, error) {
@@ -108,6 +112,7 @@ func NewClient(opts *clientbase.ClientOpts) (*Client, error) {
 	client.ProjectLogging = newProjectLoggingClient(client)
 	client.ListenConfig = newListenConfigClient(client)
 	client.Setting = newSettingClient(client)
+	client.Feature = newFeatureClient(client)
 	client.ClusterAlert = newClusterAlertClient(client)
 	client.ProjectAlert = newProjectAlertClient(client)
 	client.Notifier = newNotifierClient(client)
@@ -124,11 +129,14 @@ func NewClient(opts *clientbase.ClientOpts) (*Client, error) {
 	client.GlobalDNSProvider = newGlobalDNSProviderClient(client)
 	client.KontainerDriver = newKontainerDriverClient(client)
 	client.EtcdBackup = newEtcdBackupClient(client)
+	client.ClusterScan = newClusterScanClient(client)
 	client.MonitorMetric = newMonitorMetricClient(client)
 	client.ClusterMonitorGraph = newClusterMonitorGraphClient(client)
 	client.ProjectMonitorGraph = newProjectMonitorGraphClient(client)
 	client.CloudCredential = newCloudCredentialClient(client)
 	client.ManagementSecret = newManagementSecretClient(client)
+	client.ClusterTemplate = newClusterTemplateClient(client)
+	client.ClusterTemplateRevision = newClusterTemplateRevisionClient(client)
 
 	return client, nil
 }

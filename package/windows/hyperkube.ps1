@@ -42,12 +42,6 @@ $null = New-Item -Force -Type Directory -Path $CNIDir -ErrorAction Ignore
 $null = New-Item -Force -Type Directory -Path $NginxConfigDir -ErrorAction Ignore
 $null = New-Item -Force -Type Directory -Path $LogDir -ErrorAction Ignore
 
-if (-not $NodeName) {
-    $NodeName = hostname
-}
-$NodeName = $NodeName.ToLower()
-$KubeCNIMode = $KubeCNIMode.ToLower()
-
 Import-Module "$RancherDir\hns.psm1" -Force
 
 function print {
@@ -131,6 +125,7 @@ function repair-cloud-routes {
     switch ($KubeletCloudProviderName) {
         "aws" { add-routes -IPAddrs  @("169.254.169.254/32", "169.254.169.250/32", "169.254.169.251/32") }
         "azure" { add-routes -IPAddrs  @("169.254.169.254/32") }
+        "gce" { add-routes -IPAddrs  @("169.254.169.254/32") }
     }
 }
 
@@ -209,27 +204,24 @@ function get-hyperv-vswitch {
     $na = $null
     $ip = $null
 
-    if ($NodeIP -or $NodePublicIP)  {
-        foreach ($nai in Get-NetAdapter) {
-            try {
-                $na = $nai
-                $ip = ($na | Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Ignore).IPAddress
-                if (($ip -eq $NodeIP) -or ($ip -eq $NodePublicIP)) {
-                    break
-                }
-            } catch {}
-        }
+    if ($NodeIP)  {
+        $ip = $NodeIP
+    } elseif ($NodePublicIP) {
+        $ip = $NodePublicIP
+    }
+    if ($ip) {
+        $na = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Ignore | ? IPv4Address -eq $ip | Get-NetAdapter | ? Status -eq Up
     }
 
     if (-not $na) {
-        $na = Get-NetAdapter | ? Name -like "vEthernet (Ethernet*"
+        $na = Get-NetAdapter | ? Status -eq Up | ? Name -like "vEthernet (Ethernet*"
         if (-not $na) {
             throw "Failed to find a suitable Hyper-V vSwitch network adapter, check your network settings"
         }
-        $ip = (Get-NetIPAddress -InterfaceIndex $na.ifIndex -AddressFamily IPv4).IPAddress
+        $ip = (Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex $na.ifIndex -ErrorAction Ignore).IPv4Address
     }
 
-    $subnetMask = (Get-WmiObject Win32_NetworkAdapterConfiguration | ? InterfaceIndex -eq $($na.InterfaceIndex)).IPSubnet[0]
+    $subnetMask = (Get-WmiObject Win32_NetworkAdapterConfiguration | ? InterfaceIndex -eq $($na.ifIndex)).IPSubnet[0]
     $subnet = (convert-to-decimal-ip $ip) -band (convert-to-decimal-ip $subnetMask)
     $subnet = convert-to-dotted-ip $subnet
     $subnetCIDR = "$subnet/$(convert-to-mask-length $subnetMask)"
@@ -461,12 +453,14 @@ function config-azure-cloudprovider {
 }
 
 function print-system-info {
+    $nn = get-env-var -Key "NODE_NAME"
+
     print  "******"
     print ("*****       CNI - Component: {0}, Mode: {1}" -f $KubeCNIComponent, $KubeCNIMode)
     if ($NodeIP) {
-        print ("****       Node - Name: {0}, IP: {1}, InternalIP: {2}" -f $NodeName, $NodePublicIP, $NodeIP)
+        print ("****       Node - Name: {0}, IP: {1}, InternalIP: {2}" -f $nn, $NodePublicIP, $NodeIP)
     } else {
-        print ("****       Node - Name: {0}, IP: {1}" -f $NodeName, $NodePublicIP)
+        print ("****       Node - Name: {0}, IP: {1}" -f $nn, $NodePublicIP)
     }
     print ("***     Cluster - CIDR: {0}, Domain: {1}, ServiceCIDR: {2}, DnsServiceIP: {3}" -f $KubeClusterCIDR, $KubeClusterDomain, $KubeServiceCIDR, $KubeDnsServiceIP)
     print ("** ControlPlane - Host: {0}" -f $KubeControlPlaneAddresses)
@@ -757,9 +751,11 @@ function start-kubelet {
     }
 
     ## config running params ##
+    $nn = get-env-var -Key "NODE_NAME"
     $fgRun = get-env-var -Key "CATTLE_AGENT_FG_RUN"
     $kubeletArgs = merge-argument-list @(
         @(
+            "`"--hostname-override=$nn`""
             "`"--network-plugin=cni`""
             "`"--cni-bin-dir=$CNIDir\bin`""
             "`"--cni-conf-dir=$CNIDir\conf`""
@@ -834,8 +830,10 @@ function start-kube-proxy {
     wait-ready -Path "$KubeDir\bin\kube-proxy.exe"
 
     ## config running params ##
+    $nn = get-env-var -Key "NODE_NAME"
     $fgRun = get-env-var -Key "CATTLE_AGENT_FG_RUN"
     $cniModeArgs = @(
+        "`"--hostname-override=$nn`""
         "`"--cluster-cidr=$KubeClusterCIDR`""
         "`"--logtostderr=$fgRun`""
         "`"--alsologtostderr=true`""
@@ -907,6 +905,7 @@ function init {
     }
 
     # cloud provider #
+    $nn = $NodeName
     if ($KubeletCloudProviderName -eq "azure") {
         ## verify az cli is installed or not
         $azBinPath = "C:\Program Files (x86)\Microsoft SDKs\Azure\CLI2\wbin\az.cmd"
@@ -933,10 +932,53 @@ function init {
         }
     } elseif ($KubeletCloudProviderName -eq "aws") {
         repair-cloud-routes
+
         ## using private DNS name
-        $NodeName = scrape-text -Uri "http://169.254.169.254/latest/meta-data/hostname"
+        $nn = scrape-text -Uri "http://169.254.169.254/latest/meta-data/hostname"
+    } elseif ($KubeletCloudProviderName -eq "gce") {
+        repair-cloud-routes
+
+        ## using instance name
+        $hostname = scrape-text -Headers @{"Metadata-Flavor"="Google"} -Uri "http://169.254.169.254/computeMetadata/v1/instance/hostname?alt=json"
+        try {
+            $splited = $hostname -split "\."
+            if ($splited.Length -lt 1) {
+                $nn = $splited[0]
+            }
+        } catch {}
+
+        ## repair Get-GcePdName method ##
+        $getGcePodNameCommand = Get-Command -Name Get-GcePdName -ErrorAction Ignore
+        if (-not $getGcePodNameCommand) {
+            print "Can't find Get-GcePodName, try to repair ..."
+
+            $dllDownloadURL = "https://github.com/pjh/gce-tools/raw/master/GceTools/GetGcePdName/GetGcePdName.dll"
+            $dllPath = "$RancherDir\GetGcePdName.dll"
+            try {
+                Invoke-WebRequest -TimeoutSec 300 -UseBasicParsing -Uri $dllDownloadURL -OutFile $dllPath
+            } catch {}
+            if (-not $?) {
+                throw ("Failed to download GetGcePodName.dll from '{0}'" -f $dllDownloadURL)
+            }
+
+            print "Importing GetGcePodName.dll, wait a few seconds ..."
+
+            $profilePath = "$PsHome\profile.ps1"
+            if (-not (Test-Path $profilePath)) {
+                $nul = New-Item -Path $profilePath -Type file -ErrorAction Ignore
+            }
+            $appendProfile =
+@'
+Unblock-File -Path DLLPATH -ErrorAction Ignore
+Import-Module -Name DLLPATH -ErrorAction Ignore
+'@
+            Add-Content -Path $profilePath -Value $appendProfile.replace('DLLPATH', $dllPath) -ErrorAction Ignore
+
+            print ".................. OK"
+        }
     }
-    set-env-var -Key "NODE_NAME" -Value $NodeName
+
+    set-env-var -Key "NODE_NAME" -Value $nn.ToLower()
 }
 
 function main {
@@ -976,7 +1018,7 @@ function main {
         $recoverKubelet = $False
         $wantRecoverComps | % {
             switch ($_) {
-                "kubelet$" {
+                "kubelet" {
                     $recoverKubelet = $True
                     start-kubelet -Restart
                     break

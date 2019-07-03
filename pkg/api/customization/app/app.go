@@ -15,7 +15,7 @@ import (
 	hcommon "github.com/rancher/rancher/pkg/controllers/user/helm/common"
 	"github.com/rancher/rancher/pkg/ref"
 	clusterschema "github.com/rancher/types/apis/cluster.cattle.io/v3/schema"
-	"github.com/rancher/types/apis/management.cattle.io/v3"
+	v3 "github.com/rancher/types/apis/management.cattle.io/v3"
 	pv3 "github.com/rancher/types/apis/project.cattle.io/v3"
 	projectschema "github.com/rancher/types/apis/project.cattle.io/v3/schema"
 	clusterv3 "github.com/rancher/types/client/cluster/v3"
@@ -94,14 +94,18 @@ func (w Wrapper) ActionHandler(actionName string, action *types.Action, apiConte
 		return err
 	}
 
+	var appMap map[string]interface{}
+	if err := access.ByID(apiContext, &projectschema.Version, projectv3.AppType, apiContext.ID, &appMap); err != nil {
+		return httperror.NewAPIError(httperror.NotFound, fmt.Sprintf("unable to access app by id: %v", err))
+	}
+
+	if err := apiContext.AccessControl.CanDo(pv3.AppGroupVersionKind.Group, pv3.AppResource.Name, "update", apiContext, appMap, apiContext.Schema); err != nil {
+		return httperror.NewAPIError(httperror.PermissionDenied, fmt.Sprintf("user does not have permission to update for action %s", actionName))
+	}
+
 	creatorNotFound := false
 	if _, err := w.UserLister.Get("", app.CreatorID); err != nil && apierrors.IsNotFound(err) {
 		creatorNotFound = true
-	}
-	userCanCreateApp := apiContext.AccessControl.CanCreate(apiContext, apiContext.Schema) == nil
-
-	if creatorNotFound && !userCanCreateApp {
-		return httperror.NewAPIError(httperror.PermissionDenied, "can not upgrade/rollback app")
 	}
 
 	actionInput, err := parse.ReadBody(apiContext.Request)

@@ -5,13 +5,13 @@ import (
 	"reflect"
 	"time"
 
-	"github.com/rancher/rancher/pkg/ref"
-
 	"github.com/pkg/errors"
+	"github.com/rancher/rancher/pkg/app/utils"
 	"github.com/rancher/rancher/pkg/monitoring"
+	"github.com/rancher/rancher/pkg/ref"
 	"github.com/rancher/rancher/pkg/settings"
 	mgmtv3 "github.com/rancher/types/apis/management.cattle.io/v3"
-	"github.com/rancher/types/apis/project.cattle.io/v3"
+	v3 "github.com/rancher/types/apis/project.cattle.io/v3"
 	k8scorev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -133,7 +133,7 @@ func (ph *projectHandler) doSync(project *mgmtv3.Project, clusterName string) er
 }
 
 func (ph *projectHandler) ensureAppProjectName(appTargetNamespace string, project *mgmtv3.Project) (string, error) {
-	appProjectName, err := monitoring.EnsureAppProjectName(ph.app.agentNamespaceClient, project.Name, project.Spec.ClusterName, appTargetNamespace)
+	appProjectName, err := utils.EnsureAppProjectName(ph.app.agentNamespaceClient, project.Name, project.Spec.ClusterName, appTargetNamespace)
 	if err != nil {
 		return "", err
 	}
@@ -226,7 +226,7 @@ func (ph *projectHandler) deployApp(appName, appTargetNamespace string, appProje
 		},
 	}
 
-	deployed, err := monitoring.DeployApp(ph.app.cattleAppClient, appDeployProjectID, app, false)
+	deployed, err := utils.DeployApp(ph.app.cattleAppClient, appDeployProjectID, app, false)
 	if err != nil {
 		return err
 	}

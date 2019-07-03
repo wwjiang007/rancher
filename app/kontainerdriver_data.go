@@ -6,11 +6,11 @@ import (
 	"strings"
 
 	"github.com/rancher/rancher/pkg/controllers/management/drivers/kontainerdriver"
-	"github.com/rancher/types/apis/management.cattle.io/v3"
+	v3 "github.com/rancher/types/apis/management.cattle.io/v3"
 	"github.com/rancher/types/config"
 	"github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/apis/meta/v1"
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func addKontainerDrivers(management *config.ManagementContext) error {
@@ -42,6 +42,17 @@ func addKontainerDrivers(management *config.ManagementContext) error {
 	}
 
 	if err := creator.add("amazonElasticContainerService"); err != nil {
+		return err
+	}
+
+	if err := creator.addCustomDriver(
+		"baiducloudcontainerengine",
+		"https://github.com/cnrancher/kontainer-engine-driver-baidu/releases/download/v0.2.0/kontainer-engine-driver-baidu-linux",
+		"4613e3be3ae5487b0e21dfa761b95de2144f80f98bf76847411e5fcada343d5e",
+		"https://cluster-driver.oss-cn-shenzhen.aliyuncs.com/baidu/ui/component.js",
+		false,
+		"*.aliyuncs.com", "*.baidubce.com",
+	); err != nil {
 		return err
 	}
 

@@ -5,10 +5,10 @@ import (
 
 	"github.com/rancher/norman/types"
 	m "github.com/rancher/norman/types/mapper"
-	"github.com/rancher/types/apis/management.cattle.io/v3"
+	v3 "github.com/rancher/types/apis/management.cattle.io/v3"
 	"github.com/rancher/types/factory"
 	"github.com/rancher/types/mapper"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 )
 
 var (
@@ -40,9 +40,11 @@ var (
 		Init(globalDNSTypes).
 		Init(kontainerTypes).
 		Init(etcdBackupTypes).
+		Init(clusterScanTypes).
 		Init(monitorTypes).
 		Init(credTypes).
-		Init(mgmtSecretTypes)
+		Init(mgmtSecretTypes).
+		Init(clusterTemplateTypes)
 
 	TokenSchemas = factory.Schemas(&Version).
 			Init(tokens)
@@ -226,6 +228,7 @@ func clusterTypes(schemas *types.Schemas) *types.Schemas {
 				Input:  "rotateCertificateInput",
 				Output: "rotateCertificateOutput",
 			}
+			schema.ResourceActions[v3.ClusterActionRunCISScan] = types.Action{}
 		})
 }
 
@@ -506,7 +509,25 @@ func authnTypes(schemas *types.Schemas) *types.Schemas {
 		MustImportAndCustomize(&Version, v3.KeyCloakConfig{}, configSchema).
 		MustImportAndCustomize(&Version, v3.OKTAConfig{}, configSchema).
 		MustImport(&Version, v3.SamlConfigTestInput{}).
-		MustImport(&Version, v3.SamlConfigTestOutput{})
+		MustImport(&Version, v3.SamlConfigTestOutput{}).
+		//GoogleOAuth Config
+		MustImportAndCustomize(&Version, v3.GoogleOauthConfig{}, func(schema *types.Schema) {
+			schema.BaseType = "authConfig"
+			schema.ResourceActions = map[string]types.Action{
+				"disable": {},
+				"configureTest": {
+					Input:  "googleOauthConfig",
+					Output: "googleOauthConfigTestOutput",
+				},
+				"testAndApply": {
+					Input: "googleOauthConfigApplyInput",
+				},
+			}
+			schema.CollectionMethods = []string{}
+			schema.ResourceMethods = []string{http.MethodGet, http.MethodPut}
+		}).
+		MustImport(&Version, v3.GoogleOauthConfigApplyInput{}).
+		MustImport(&Version, v3.GoogleOauthConfigTestOutput{})
 }
 
 func configSchema(schema *types.Schema) {
@@ -588,6 +609,12 @@ func globalTypes(schema *types.Schemas) *types.Schemas {
 		).
 		MustImport(&Version, v3.ListenConfig{}).
 		MustImportAndCustomize(&Version, v3.Setting{}, func(schema *types.Schema) {
+			schema.MustCustomizeField("name", func(f types.Field) types.Field {
+				f.Required = true
+				return f
+			})
+		}).
+		MustImportAndCustomize(&Version, v3.Feature{}, func(schema *types.Schema) {
 			schema.MustCustomizeField("name", func(f types.Field) types.Field {
 				f.Required = true
 				return f
@@ -798,9 +825,32 @@ func monitorTypes(schemas *types.Schemas) *types.Schemas {
 				},
 			}
 		})
-
 }
 
 func etcdBackupTypes(schemas *types.Schemas) *types.Schemas {
 	return schemas.MustImport(&Version, v3.EtcdBackup{})
+}
+
+func clusterTemplateTypes(schemas *types.Schemas) *types.Schemas {
+	return schemas.
+		TypeName("clusterTemplate", v3.ClusterTemplate{}).
+		TypeName("clusterTemplateRevision", v3.ClusterTemplateRevision{}).
+		AddMapperForType(&Version, v3.ClusterTemplate{}, m.Drop{Field: "namespaceId"}, m.DisplayName{}).
+		AddMapperForType(&Version, v3.ClusterTemplateRevision{}, m.Drop{Field: "namespaceId"}).
+		MustImport(&Version, v3.ClusterTemplateQuestionsOutput{}).
+		MustImport(&Version, v3.ClusterTemplate{}).
+		MustImportAndCustomize(&Version, v3.ClusterTemplateRevision{}, func(schema *types.Schema) {
+			schema.CollectionActions = map[string]types.Action{
+				"listquestions": {
+					Output: "clusterTemplateQuestionsOutput",
+				},
+			}
+		})
+}
+
+func clusterScanTypes(schemas *types.Schemas) *types.Schemas {
+	return schemas.MustImportAndCustomize(&Version, v3.ClusterScan{}, func(schema *types.Schema) {
+		schema.CollectionMethods = []string{http.MethodGet}
+		schema.ResourceMethods = []string{http.MethodGet, http.MethodDelete}
+	})
 }

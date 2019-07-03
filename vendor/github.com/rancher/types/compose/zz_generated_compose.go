@@ -40,6 +40,7 @@ type Config struct {
 	ProjectLoggings                          map[string]managementClient.ProjectLogging                          `json:"projectLoggings,omitempty" yaml:"projectLoggings,omitempty"`
 	ListenConfigs                            map[string]managementClient.ListenConfig                            `json:"listenConfigs,omitempty" yaml:"listenConfigs,omitempty"`
 	Settings                                 map[string]managementClient.Setting                                 `json:"settings,omitempty" yaml:"settings,omitempty"`
+	Features                                 map[string]managementClient.Feature                                 `json:"features,omitempty" yaml:"features,omitempty"`
 	ClusterAlerts                            map[string]managementClient.ClusterAlert                            `json:"clusterAlerts,omitempty" yaml:"clusterAlerts,omitempty"`
 	ProjectAlerts                            map[string]managementClient.ProjectAlert                            `json:"projectAlerts,omitempty" yaml:"projectAlerts,omitempty"`
 	Notifiers                                map[string]managementClient.Notifier                                `json:"notifiers,omitempty" yaml:"notifiers,omitempty"`
@@ -61,6 +62,8 @@ type Config struct {
 	ProjectMonitorGraphs                     map[string]managementClient.ProjectMonitorGraph                     `json:"projectMonitorGraphs,omitempty" yaml:"projectMonitorGraphs,omitempty"`
 	CloudCredentials                         map[string]managementClient.CloudCredential                         `json:"cloudCredentials,omitempty" yaml:"cloudCredentials,omitempty"`
 	ManagementSecrets                        map[string]managementClient.ManagementSecret                        `json:"managementSecrets,omitempty" yaml:"managementSecrets,omitempty"`
+	ClusterTemplates                         map[string]managementClient.ClusterTemplate                         `json:"clusterTemplates,omitempty" yaml:"clusterTemplates,omitempty"`
+	ClusterTemplateRevisions                 map[string]managementClient.ClusterTemplateRevision                 `json:"clusterTemplateRevisions,omitempty" yaml:"clusterTemplateRevisions,omitempty"`
 
 	// Cluster Client
 	Namespaces        map[string]clusterClient.Namespace        `json:"namespaces,omitempty" yaml:"namespaces,omitempty"`
@@ -107,4 +110,5 @@ type Config struct {
 	ServiceMonitors                map[string]projectClient.ServiceMonitor                `json:"serviceMonitors,omitempty" yaml:"serviceMonitors,omitempty"`
 	PrometheusRules                map[string]projectClient.PrometheusRule                `json:"prometheusRules,omitempty" yaml:"prometheusRules,omitempty"`
 	Alertmanagers                  map[string]projectClient.Alertmanager                  `json:"alertmanagers,omitempty" yaml:"alertmanagers,omitempty"`
+	HorizontalPodAutoscalers       map[string]projectClient.HorizontalPodAutoscaler       `json:"horizontalPodAutoscalers,omitempty" yaml:"horizontalPodAutoscalers,omitempty"`
 }

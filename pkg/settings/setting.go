@@ -5,7 +5,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/rancher/types/apis/management.cattle.io/v3"
+	v3 "github.com/rancher/types/apis/management.cattle.io/v3"
 )
 
 var (
@@ -24,11 +24,13 @@ var (
 	EngineNewestVersion             = NewSetting("engine-newest-version", "v17.12.0")
 	EngineSupportedRange            = NewSetting("engine-supported-range", "~v1.11.2 || ~v1.12.0 || ~v1.13.0 || ~v17.03.0 || ~v17.06.0 || ~v17.09.0 || ~v18.06.0 || ~v18.09.0")
 	FirstLogin                      = NewSetting("first-login", "true")
+	GlobalRegistryEnabled           = NewSetting("global-registry-enabled", "false")
 	HelmVersion                     = NewSetting("helm-version", "dev")
 	IngressIPDomain                 = NewSetting("ingress-ip-domain", "xip.io")
 	InstallUUID                     = NewSetting("install-uuid", "")
 	KubernetesVersion               = NewSetting("k8s-version", v3.DefaultK8s)
 	KubernetesVersionToSystemImages = NewSetting("k8s-version-to-images", getSystemImages())
+	KubernetesVersionsCurrent       = NewSetting("k8s-versions-current", getK8sVersionsCurrent())
 	MachineVersion                  = NewSetting("machine-version", "dev")
 	Namespace                       = NewSetting("namespace", os.Getenv("CATTLE_NAMESPACE"))
 	PeerServices                    = NewSetting("peer-service", os.Getenv("CATTLE_PEER_SERVICE"))
@@ -38,7 +40,7 @@ var (
 	ServerURL                       = NewSetting("server-url", "")
 	ServerVersion                   = NewSetting("server-version", "dev")
 	SystemDefaultRegistry           = NewSetting("system-default-registry", "")
-	SystemNamespaces                = NewSetting("system-namespaces", "kube-system,kube-public,cattle-system,cattle-alerting,cattle-logging,cattle-pipeline,cattle-prometheus,ingress-nginx,cattle-global-data")
+	SystemNamespaces                = NewSetting("system-namespaces", "kube-system,kube-public,cattle-system,cattle-alerting,cattle-logging,cattle-pipeline,cattle-prometheus,ingress-nginx,cattle-global-data,cattle-istio,kube-node-lease")
 	TelemetryOpt                    = NewSetting("telemetry-opt", "prompt")
 	TLSMinVersion                   = NewSetting("tls-min-version", "1.2")
 	TLSCiphers                      = NewSetting("tls-ciphers", "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305")
@@ -46,16 +48,19 @@ var (
 	UIIndex                         = NewSetting("ui-index", "https://releases.rancher.com/ui/latest2/index.html")
 	UIPath                          = NewSetting("ui-path", "")
 	UIPL                            = NewSetting("ui-pl", "rancher")
-	UIKubernetesSupportedVersions   = NewSetting("ui-k8s-supported-versions-range", ">= 1.11.0 <=1.13.x")
-	UIKubernetesDefaultVersion      = NewSetting("ui-k8s-default-version-range", "<=1.13.x")
+	UIKubernetesSupportedVersions   = NewSetting("ui-k8s-supported-versions-range", ">= 1.11.0 <=1.14.x")
+	UIKubernetesDefaultVersion      = NewSetting("ui-k8s-default-version-range", "<=1.14.x")
 	WhitelistDomain                 = NewSetting("whitelist-domain", "forums.rancher.com")
 	SystemMonitoringCatalogID       = NewSetting("system-monitoring-catalog-id", "catalog://?catalog=system-library&template=rancher-monitoring&version=0.0.3")
 	SystemLoggingCatalogID          = NewSetting("system-logging-catalog-id", "catalog://?catalog=system-library&template=rancher-logging&version=0.1.1")
 	SystemExternalDNSCatalogID      = NewSetting("system-externaldns-catalog-id", "catalog://?catalog=system-library&template=rancher-external-dns&version=0.0.1")
+	SystemGlobalIstioCatalogID      = NewSetting("system-global-istio-catalog-id", "catalog://?catalog=system-library&template=rancher-istio&version=0.0.1")
+	SystemCISBenchmarkCatalogID     = NewSetting("system-cis-benchmark-catalog-id", "catalog://?catalog=system-library&template=rancher-cis-benchmark&version=0.1.0")
 	AuthUserInfoResyncCron          = NewSetting("auth-user-info-resync-cron", "0 0 * * *")
 	AuthUserInfoMaxAgeSeconds       = NewSetting("auth-user-info-max-age-seconds", "3600") // 1 hour
 	APIUIVersion                    = NewSetting("api-ui-version", "1.1.6")                // Please update the CATTLE_API_UI_VERSION in package/Dockerfile when updating the version here.
 	RotateCertsIfExpiringInDays     = NewSetting("rotate-certs-if-expiring-in-days", "7")  // 7 days
+	ClusterTemplateEnforcement      = NewSetting("cluster-template-enforcement", "false")
 )
 
 func init() {
@@ -145,6 +150,10 @@ func getSystemImages() string {
 		return ""
 	}
 	return string(data)
+}
+
+func getK8sVersionsCurrent() string {
+	return strings.Join(v3.K8sVersionsCurrent, ",")
 }
 
 func GetEnvKey(key string) string {

@@ -1,9 +1,13 @@
 import kubernetes
+import pytest
 from rancher import ApiError
+import time
 
 from .common import random_str
+from .test_catalog import wait_for_template_to_be_created
 from .conftest import wait_until_available, \
-    cluster_and_client, kubernetes_api_client, wait_for, ClusterContext
+    cluster_and_client, user_project_client, \
+    kubernetes_api_client, wait_for, ClusterContext
 
 
 def test_multi_user(admin_mc, user_mc):
@@ -380,14 +384,301 @@ def ns_count(client, count):
 
 def test_appropriate_users_can_see_kontainer_drivers(user_factory):
     kds = user_factory().client.list_kontainer_driver()
-    assert len(kds) == 7
+    assert len(kds) == 8
 
     kds = user_factory('clusters-create').client.list_kontainer_driver()
-    assert len(kds) == 7
+    assert len(kds) == 8
 
     kds = user_factory('kontainerdrivers-manage').client. \
         list_kontainer_driver()
-    assert len(kds) == 7
+    assert len(kds) == 8
 
     kds = user_factory('settings-manage').client.list_kontainer_driver()
     assert len(kds) == 0
+
+
+def test_readonly_cannot_perform_app_action(admin_mc, admin_pc, user_mc,
+                                            remove_resource):
+    """Tests that a user with readonly access is not able to upgrade an app
+    """
+    client = admin_pc.client
+    project = admin_pc.project
+
+    user = user_mc
+    remove_resource(user)
+    ns = admin_pc.cluster.client.create_namespace(name=random_str(),
+                                                  projectId=project.id)
+    remove_resource(ns)
+
+    wait_for_template_to_be_created(admin_mc.client, "library")
+
+    prtb = admin_mc.client.create_project_role_template_binding(
+        name="prtb-" + random_str(),
+        userId=user.user.id,
+        projectId=project.id,
+        roleTemplateId="read-only")
+    remove_resource(prtb)
+
+    wait_until_available(user.client, project)
+
+    app = client.create_app(
+        name="app-" + random_str(),
+        externalId="catalog://?catalog=library&template=mysql&version=0.3.7&"
+                   "namespace=cattle-global-data",
+        targetNamespace=ns.name,
+        projectId=project.id
+    )
+
+    with pytest.raises(ApiError) as e:
+        user.client.action(obj=app, action_name="upgrade",
+                           answers={"abc": "123"})
+    assert e.value.error.status == 403
+
+    with pytest.raises(ApiError) as e:
+        user.client.action(obj=app, action_name="rollback",
+                           revisionId="test")
+    assert e.value.error.status == 403
+
+
+def test_member_can_perform_app_action(admin_mc, admin_pc, remove_resource,
+                                       user_mc):
+    """Tests that a user with member access is able to upgrade an app
+    """
+    client = admin_pc.client
+    project = admin_pc.project
+
+    user = user_mc
+    remove_resource(user)
+
+    ns = admin_pc.cluster.client.create_namespace(name=random_str(),
+                                                  projectId=project.id)
+    remove_resource(ns)
+
+    wait_for_template_to_be_created(admin_mc.client, "library")
+
+    prtb = admin_mc.client.create_project_role_template_binding(
+        name="test-" + random_str(),
+        userId=user.user.id,
+        projectId=project.id,
+        roleTemplateId="project-owner")
+    remove_resource(prtb)
+
+    wait_until_available(user.client, project)
+
+    app = client.create_app(
+        name="test-" + random_str(),
+        externalId="catalog://?catalog=library&template"
+                   "=mysql&version=0.3.7&"
+                   "namespace=cattle-global-data",
+        targetNamespace=ns.name,
+        projectId=project.id
+    )
+
+    # if upgrade is performed prior to installing state,
+    # it may return a modified error
+    def is_installing():
+        current_state = client.reload(app)
+        if current_state.state == "installing":
+            return True
+        return False
+
+    try:
+        wait_for(is_installing)
+    except Exception as e:
+        # a timeout here is okay, the intention of the wait_for is to reach a
+        # steady state, this test is not concerned with whether an app reaches
+        # installing state or not
+        assert "Timeout waiting for condition" in str(e)
+
+    user.client.action(
+        obj=app,
+        action_name="upgrade",
+        answers={"asdf": "asdf"})
+
+    '''
+        TODO: write rollback test, currently blocked by issue #20204
+    '''
+
+
+def test_readonly_cannot_edit_secret(admin_mc, user_mc, admin_pc,
+                                     remove_resource):
+    """Tests that a user with readonly access is not able to create/update
+     a secret or ns secret
+    """
+    project = admin_pc.project
+    user_client = user_mc.client
+
+    prtb = admin_mc.client.create_project_role_template_binding(
+        name="prtb-" + random_str(),
+        userId=user_mc.user.id,
+        projectId=project.id,
+        roleTemplateId="read-only"
+    )
+    remove_resource(prtb)
+
+    wait_until_available(user_client, project)
+
+    proj_user_client = user_project_client(user_mc, project)
+
+    # readonly should failed to create a regular secret
+    with pytest.raises(ApiError) as e:
+        proj_user_client.create_secret(
+            name="test-" + random_str(),
+            stringData={
+                'abc': '123'
+             }
+        )
+    assert e.value.error.status == 403
+
+    secret = admin_pc.client.create_secret(
+        name="test-" + random_str(),
+        stringData={
+            'abc': '123'
+        }
+    )
+    remove_resource(secret)
+
+    wait_until_available(admin_pc.client, secret)
+
+    # readonly should failed to update a regular secret
+    with pytest.raises(ApiError) as e:
+        proj_user_client.update_by_id_secret(
+            id=secret.id,
+            stringData={
+                'asd': 'fgh'
+            }
+        )
+    assert e.value.error.status == 404
+
+    ns = admin_pc.cluster.client.create_namespace(
+        name='test-' + random_str(),
+        projectId=project.id
+    )
+    remove_resource(ns)
+
+    # readonly should fail to create ns secret
+    with pytest.raises(ApiError) as e:
+        proj_user_client.create_namespaced_secret(
+            namespaceId=ns.id,
+            name="test-" + random_str(),
+            stringData={
+                'abc': '123'
+            }
+        )
+    assert e.value.error.status == 403
+
+    ns_secret = admin_pc.client.create_namespaced_secret(
+        namespaceId=ns.id,
+        name="test-" + random_str(),
+        stringData={
+            'abc': '123'
+        }
+    )
+    remove_resource(ns_secret)
+
+    wait_until_available(admin_pc.client, ns_secret)
+
+    # readonly should fail to update ns secret
+    with pytest.raises(ApiError) as e:
+        proj_user_client.update_by_id_namespaced_secret(
+            namespaceId=ns.id,
+            id=ns_secret.id,
+            stringData={
+                'asd': 'fgh'
+            }
+        )
+    assert e.value.error.status == 404
+
+
+def test_member_can_edit_secret(admin_mc, admin_pc, remove_resource,
+                                user_mc):
+    """Tests that a user with project-member role is able to create/update
+    secrets and namespaced secrets
+    """
+    project = admin_pc.project
+    user_client = user_mc.client
+
+    ns = admin_pc.cluster.client.create_namespace(
+        name='test-' + random_str(),
+        projectId=project.id
+    )
+    remove_resource(ns)
+
+    prtb = admin_mc.client.create_project_role_template_binding(
+        name="prtb-" + random_str(),
+        userId=user_mc.user.id,
+        projectId=project.id,
+        roleTemplateId="project-member"
+    )
+
+    remove_resource(prtb)
+
+    wait_until_available(user_client, project)
+
+    proj_user_client = user_project_client(user_mc, project)
+
+    def try_create_secret():
+        try:
+            return proj_user_client.create_secret(
+                name="secret-" + random_str(),
+                stringData={
+                    'abc': '123'
+                }
+            )
+        except ApiError as e:
+            assert e.error.status == 403
+        return False
+
+    # Permission to create secret may not have been granted yet,
+    # so it will be retried for 45 seconds
+    secret = wait_for(try_create_secret, fail_handler=lambda:
+                      "do not have permission to create secret")
+    remove_resource(secret)
+
+    wait_until_available(proj_user_client, secret)
+
+    proj_user_client.update_by_id_secret(id=secret.id, stringData={
+        'asd': 'fgh'
+     })
+
+    def try_create_ns_secret():
+        try:
+            return proj_user_client.create_namespaced_secret(
+                name="secret-" + random_str(),
+                namespaceId=ns.id,
+                stringData={
+                    "abc": "123"
+                }
+            )
+
+        except ApiError as e:
+            assert e.error.status == 403
+        return False
+
+    ns_secret = wait_for(try_create_ns_secret, fail_handler=lambda:
+                         "do not have permission to create ns secret")
+    remove_resource(ns_secret)
+
+    wait_until_available(proj_user_client, ns_secret)
+
+    proj_user_client.update_by_id_namespaced_secret(
+        namespaceId=ns.id,
+        id=ns_secret.id,
+        stringData={
+            "asd": "fgh"
+        }
+    )
+
+
+def wait_for_workload(client, ns, timeout=60, count=0):
+    start = time.time()
+    interval = 0.5
+    workloads = client.list_workload(namespaceId=ns)
+    while len(workloads.data) != count:
+        if time.time() - start > timeout:
+            print(workloads)
+            raise Exception('Timeout waiting for workload service')
+        time.sleep(interval)
+        interval *= 2
+        workloads = client.list_workload(namespaceId=ns)
+    return workloads

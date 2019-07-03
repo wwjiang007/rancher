@@ -13,10 +13,10 @@ import (
 	"github.com/rancher/norman/condition"
 	"github.com/rancher/rancher/pkg/ticker"
 	corev1 "github.com/rancher/types/apis/core/v1"
-	"github.com/rancher/types/apis/management.cattle.io/v3"
+	v3 "github.com/rancher/types/apis/management.cattle.io/v3"
 	"github.com/rancher/types/config"
 	"github.com/sirupsen/logrus"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -36,6 +36,7 @@ type HealthSyncer struct {
 	clusterLister     v3.ClusterLister
 	clusters          v3.ClusterInterface
 	componentStatuses corev1.ComponentStatusInterface
+	namespaces        corev1.NamespaceInterface
 	clusterManager    ClusterControllerLifecycle
 }
 
@@ -46,6 +47,7 @@ func Register(ctx context.Context, workload *config.UserContext, clusterManager 
 		clusterLister:     workload.Management.Management.Clusters("").Controller().Lister(),
 		clusters:          workload.Management.Management.Clusters(""),
 		componentStatuses: workload.Core.ComponentStatuses(""),
+		namespaces:        workload.Core.Namespaces(""),
 		clusterManager:    clusterManager,
 	}
 
@@ -62,6 +64,13 @@ func (h *HealthSyncer) syncHealth(ctx context.Context, syncHealth time.Duration)
 }
 
 func (h *HealthSyncer) getComponentStatus(cluster *v3.Cluster) error {
+	// Prior to k8s v1.14, we only needed to list the ComponentStatuses from the user cluster.
+	// As of k8s v1.14, kubeapi returns a successfull ComponentStatuses response even if etcd is not available.
+	// To work around this, now we try to get a namespace from the API, even if not found, it means the API is up.
+	if _, err := h.namespaces.Get("kube-system", metav1.GetOptions{}); err != nil && !apierrors.IsNotFound(err) {
+		return condition.Error("ComponentStatsFetchingFailure", errors.Wrap(err, "Failed to communicate with API server"))
+	}
+
 	cses, err := h.componentStatuses.List(metav1.ListOptions{})
 	if err != nil {
 		return condition.Error("ComponentStatsFetchingFailure", errors.Wrap(err, "Failed to communicate with API server"))

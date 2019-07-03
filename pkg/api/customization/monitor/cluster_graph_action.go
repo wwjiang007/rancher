@@ -16,7 +16,7 @@ import (
 	"github.com/rancher/rancher/pkg/clustermanager"
 	monitorutil "github.com/rancher/rancher/pkg/monitoring"
 	"github.com/rancher/rancher/pkg/ref"
-	"github.com/rancher/types/apis/management.cattle.io/v3"
+	v3 "github.com/rancher/types/apis/management.cattle.io/v3"
 	mgmtclientv3 "github.com/rancher/types/client/management/v3"
 	"github.com/rancher/types/config"
 	"github.com/rancher/types/config/dialer"
@@ -63,16 +63,22 @@ func (h *ClusterGraphHandler) QuerySeriesAction(actionName string, action *types
 		return fmt.Errorf("get usercontext failed, %v", err)
 	}
 
-	prometheusName, prometheusNamespace := monitorutil.ClusterMonitoringInfo()
-	token, err := getAuthToken(userContext, prometheusName, prometheusNamespace)
-	if err != nil {
-		return err
-	}
-
 	reqContext, cancel := context.WithTimeout(context.Background(), prometheusReqTimeout)
 	defer cancel()
 
-	svcName, svcNamespace, svcPort := monitorutil.ClusterPrometheusEndpoint()
+	var svcName, svcNamespace, svcPort, token string
+	if inputParser.Input.Filters["resourceType"] == "istiocluster" {
+		inputParser.Input.MetricParams["namespace"] = ".*"
+		svcName, svcNamespace, svcPort = monitorutil.IstioPrometheusEndpoint()
+	} else {
+		prometheusName, prometheusNamespace := monitorutil.ClusterMonitoringInfo()
+		token, err = getAuthToken(userContext, prometheusName, prometheusNamespace)
+		if err != nil {
+			return err
+		}
+		svcName, svcNamespace, svcPort = monitorutil.ClusterPrometheusEndpoint()
+	}
+
 	prometheusQuery, err := NewPrometheusQuery(reqContext, clusterName, token, svcNamespace, svcName, svcPort, h.dialerFactory, userContext)
 	if err != nil {
 		return err
@@ -142,8 +148,9 @@ type metricWrap struct {
 }
 
 func graph2Metrics(userContext *config.UserContext, mgmtClient v3.Interface, clusterName, resourceType, refGraphName string, metricSelector, detailsMetricSelector map[string]string, metricParams map[string]string, isDetails bool) ([]*metricWrap, error) {
+	projectName, _ := ref.Parse(refGraphName)
 	nodeLister := mgmtClient.Nodes(metav1.NamespaceAll).Controller().Lister()
-	newMetricParams, err := parseMetricParams(userContext, nodeLister, resourceType, clusterName, metricParams)
+	newMetricParams, err := parseMetricParams(userContext, nodeLister, resourceType, clusterName, projectName, metricParams)
 	if err != nil {
 		return nil, err
 	}

@@ -3,21 +3,18 @@ package endpoints
 import (
 	"bytes"
 	"context"
-	"sort"
-
-	"github.com/rancher/rancher/pkg/settings"
-
 	"encoding/json"
 	"fmt"
-	"reflect"
-
 	"net"
+	"reflect"
+	"sort"
 
 	workloadUtil "github.com/rancher/rancher/pkg/controllers/user/workload"
 	nodehelper "github.com/rancher/rancher/pkg/node"
-	"github.com/rancher/types/apis/core/v1"
+	"github.com/rancher/rancher/pkg/settings"
+	v1 "github.com/rancher/types/apis/core/v1"
 	managementv3 "github.com/rancher/types/apis/management.cattle.io/v3"
-	"github.com/rancher/types/apis/project.cattle.io/v3"
+	v3 "github.com/rancher/types/apis/project.cattle.io/v3"
 	"github.com/rancher/types/config"
 	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
@@ -132,7 +129,7 @@ func convertServiceToPublicEndpoints(svc *corev1.Service, clusterName string, no
 
 	svcName := fmt.Sprintf("%s:%s", svc.Namespace, svc.Name)
 	if svc.Spec.Type == "NodePort" {
-		addresses := []string{}
+		var addresses []string
 		if allNodesIP != "" {
 			addresses = append(addresses, allNodesIP)
 		}
@@ -157,7 +154,7 @@ func convertServiceToPublicEndpoints(svc *corev1.Service, clusterName string, no
 	} else {
 		var addresses []string
 		for _, ingressEp := range svc.Status.LoadBalancer.Ingress {
-			address := ingressEp.Hostname
+			address = ingressEp.Hostname
 			if address == "" {
 				address = ingressEp.IP
 			}
@@ -229,11 +226,9 @@ func getNodeNameToMachine(clusterName string, machineLister managementv3.NodeLis
 		return nil, err
 	}
 	machineMap := map[string]*managementv3.Node{}
-	if err != nil {
-		return nil, err
-	}
 	for _, machine := range machines {
-		node, err := nodehelper.GetNodeForMachine(machine, nodeLister)
+		var node *corev1.Node
+		node, err = nodehelper.GetNodeForMachine(machine, nodeLister)
 		if err != nil {
 			return nil, err
 		}

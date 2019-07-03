@@ -31,6 +31,12 @@ $null = New-Item -Force -Type Directory -Path $RancherDir -ErrorAction Ignore
 $null = New-Item -Force -Type Directory -Path $KubeDir -ErrorAction Ignore
 $null = New-Item -Force -Type Directory -Path $CNIDir -ErrorAction Ignore
 
+function warn {
+    Write-Host -NoNewline -ForegroundColor DarkYellow "WARN"
+    Write-Host -NoNewline -ForegroundColor Gray "[0000] "
+    Write-Host -ForegroundColor Gray $_
+}
+
 function scrape-text {
     param(
         [parameter(Mandatory = $false)] $Headers = @{"Cache-Control"="no-cache"},
@@ -75,8 +81,8 @@ function get-address {
         "dopublic" { return (scrape-text -Uri "http://169.254.169.254/metadata/v1/interfaces/public/0/ipv4/address") }
         "azprivate" { return (scrape-text -Headers @{"Metadata"="true"} -Uri "http://169.254.169.254/metadata/instance/network/interface/0/ipv4/ipAddress/0/privateIpAddress?api-version=2017-08-01&format=text") }
         "azpublic" { return (scrape-text -Headers @{"Metadata"="true"} -Uri "http://169.254.169.254/metadata/instance/network/interface/0/ipv4/ipAddress/0/publicIpAddress?api-version=2017-08-01&format=text") }
-        "gceinternal" { return (scrape-text -Headers @{"Metadata-Flavor"="Google"} -Uri "http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/ip") }
-        "gceexternal" { return (scrape-text -Headers @{"Metadata-Flavor"="Google"} -Uri "http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip") }
+        "gceinternal" { return (scrape-text -Headers @{"Metadata-Flavor"="Google"} -Uri "http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/ip?alt=json") }
+        "gceexternal" { return (scrape-text -Headers @{"Metadata-Flavor"="Google"} -Uri "http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip?alt=json") }
         "packetlocal" { return (scrape-text -Uri "https://metadata.packet.net/2009-04-04/meta-data/local-ipv4") }
         "packetpublic" { return (scrape-text -Uri "https://metadata.packet.net/2009-04-04/meta-data/public-ipv4") }
         "ipify" { return (scrape-text -Uri "https://api.ipify.org") }
@@ -93,11 +99,6 @@ function set-env-var {
 
     [Environment]::SetEnvironmentVariable($Key, $Value, [EnvironmentVariableTarget]::Process)
     [Environment]::SetEnvironmentVariable($Key, $Value, [EnvironmentVariableTarget]::Machine)
-}
-
-function get-agent-service {
-    $svcRancherAgt = Get-Service -Name "rancher-agent" -ErrorAction Ignore
-    return $svcRancherAgt
 }
 
 ## END main definitaion
@@ -127,30 +128,47 @@ if (-not $currentPrincipal.IsInRole([System.Security.Principal.WindowsBuiltInRol
 
 # set http client #
 try {
-    add-type @"
-    using System.Net;
-    using System.Security.Cryptography.X509Certificates;
-    public class TrustAllCertsPolicy : ICertificatePolicy {
-        public bool CheckValidationResult(
-            ServicePoint srvPoint, X509Certificate certificate,
-            WebRequest request, int certificateProblem) {
-            return true;
-        }
+    if (-not ([System.Management.Automation.PSTypeName]"SkipServerCertificateValidation").Type) {
+        Add-Type -TypeDefinition  @"
+using System.Net;
+using System.Net.Security;
+using System.Security.Cryptography.X509Certificates;
+public static class SkipServerCertificateValidation
+{
+    private static bool Callback(object sender, X509Certificate certificate, X509Chain chain,
+        SslPolicyErrors sslPolicyErrors) { return true; }
+    public static void Enable() {
+        ServicePointManager.ServerCertificateValidationCallback = Callback;
+        ServicePointManager.SecurityProtocol = SecurityProtocolType.Ssl3 | SecurityProtocolType.Tls | SecurityProtocolType.Tls11 | SecurityProtocolType.Tls12;
     }
-"@
-} catch {}
-[System.Net.ServicePointManager]::CertificatePolicy = New-Object TrustAllCertsPolicy
-[Net.ServicePointManager]::SecurityProtocol = @([Net.SecurityProtocolType]::SystemDefault, [Net.SecurityProtocolType]::Ssl3, [Net.SecurityProtocolType]::Tls, [Net.SecurityProtocolType]::Tls11, [Net.SecurityProtocolType]::Tls12)
-
-# check docker running #
-$dockerNPipe = Get-ChildItem //./pipe/ | ? Name -eq "docker_engine"
-if (-not $dockerNPipe) {
-    throw "Please run docker daemon with host `"npipe:////./pipe//docker_engine`""
 }
+"@
+    }
+    [SkipServerCertificateValidation]::Enable()
+} catch {}
 
-$svcAgent = get-agent-service
+# check rancher-agent running #
+$svcAgent = Get-Service -Name "rancher-agent" -ErrorAction Ignore
 if ($svcAgent -and ($svcAgent.Status -eq "Running")) {
     throw "rancher agent is already on running"
+}
+
+# check msiscsi servcie running #
+$svcMsiscsi = Get-Service -Name "msiscsi" -ErrorAction Ignore
+if ($svcMsiscsi -and ($svcMsiscsi.Status -ne "Running")) {
+    Set-Service -Name "msiscsi" -StartupType Automatic
+    Start-Service -Name "msiscsi" -ErrorAction Ignore
+    if (-not $?) {
+        warn "Failed to start msiscsi service, you may not be able to use the iSCSI flexvolume properly"
+    }
+}
+
+# check docker running #
+$dockerNPipe = Get-ChildItem //./pipe/ -ErrorAction Ignore | ? Name -eq "docker_engine"
+if (-not $dockerNPipe) {
+    warn "Default docker named pipe is not found"
+    warn "Please bind mount in the docker socket to //./pipe/docker_engine if docker errors occur"
+    warn "example:  docker run -v //./pipe/docker_engine://./pipe/docker_engine ..."
 }
 
 # check cattle server address #
@@ -158,7 +176,7 @@ if (-not $CATTLE_SERVER) {
     throw "-server is a required option"
 } else {
     try {
-        $null = scrape-text  -Uri "$CATTLE_SERVER/ping"
+        $null = scrape-text -Uri "$CATTLE_SERVER/ping"
     } catch {
         throw ("{0} is not accessible ({1})" -f $CATTLE_SERVER, $_.Exception.Message)
     }
@@ -217,11 +235,19 @@ if ($CATTLE_CA_CHECKSUM) {
     $temp.MoveTo("$SSL_CERT_DIR\serverca")
 
     #import the self-signed certificate#
-    $cacertsBytes = [Convert]::FromBase64String((Get-Content "$SSL_CERT_DIR\serverca" | select -Skip 1 | select -SkipLast 1))
-    $cacertsFile = "$env:TEMP\serverca.cer"
-    Set-Content -Value $cacertsBytes -Path $cacertsFile -Encoding Byte
-    Import-Certificate -CertStoreLocation 'Cert:\LocalMachine\Root' -FilePath $cacertsFile | Out-Null
-    rm -Force $cacertsFile -ErrorAction Ignore
+    $caBytes = $null
+    Get-Content "$SSL_CERT_DIR\serverca" | % {
+        if ($_ -match '-+BEGIN CERTIFICATE-+') {
+            $caBytes = @()
+        } elseif ($_ -match '-+END CERTIFICATE-+') {
+            $caTemp = New-TemporaryFile
+            Set-Content -Value $caBytes -Path $caTemp.FullName -Encoding Byte
+            Import-Certificate -CertStoreLocation 'Cert:\LocalMachine\Root' -FilePath $caTemp.FullName | Out-Null
+            $caTemp.Delete()
+        } else {
+            $caBytes += [Convert]::FromBase64String($_)
+        }
+    }
 }
 
 # add labels #
@@ -282,14 +308,10 @@ if ($CATTLE_AGENT_FG_RUN -eq "true") {
     .\agent.exe
 } else {
     .\agent.exe --register-service *>$null
-    $svcAgent = get-agent-service
-    if (-not $svcAgent) {
-        throw "Can't start rancher agent service, because no exist"
-    } else {
-        Start-Service -Name "rancher-agent" -ErrorAction Ignore
-        if (-not $?) {
-            throw "Start rancher agent failed"
-        }
+
+    Start-Service -Name "rancher-agent" -ErrorAction Ignore
+    if (-not $?) {
+        throw "Start rancher agent failed"
     }
 
     .\log.ps1

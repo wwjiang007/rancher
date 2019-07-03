@@ -9,6 +9,8 @@ import (
 	"github.com/rancher/rancher/pkg/controllers/management/compose/common"
 	"github.com/rancher/rancher/pkg/controllers/user/alert"
 	"github.com/rancher/rancher/pkg/controllers/user/approuter"
+	"github.com/rancher/rancher/pkg/controllers/user/certsexpiration"
+	"github.com/rancher/rancher/pkg/controllers/user/cis"
 	"github.com/rancher/rancher/pkg/controllers/user/clusterauthtoken"
 	"github.com/rancher/rancher/pkg/controllers/user/dnsrecord"
 	"github.com/rancher/rancher/pkg/controllers/user/endpoints"
@@ -18,6 +20,7 @@ import (
 	"github.com/rancher/rancher/pkg/controllers/user/helm"
 	"github.com/rancher/rancher/pkg/controllers/user/ingress"
 	"github.com/rancher/rancher/pkg/controllers/user/ingresshostgen"
+	"github.com/rancher/rancher/pkg/controllers/user/istio"
 	"github.com/rancher/rancher/pkg/controllers/user/logging"
 	"github.com/rancher/rancher/pkg/controllers/user/monitoring"
 	"github.com/rancher/rancher/pkg/controllers/user/networkpolicy"
@@ -51,6 +54,7 @@ func Register(ctx context.Context, cluster *config.UserContext, clusterRec *mana
 	helm.Register(ctx, cluster, kubeConfigGetter)
 	logging.Register(ctx, cluster)
 	networkpolicy.Register(ctx, cluster)
+	cis.Register(ctx, cluster)
 	noderemove.Register(ctx, cluster)
 	nodesyncer.Register(ctx, cluster, kubeConfigGetter)
 	pipeline.Register(ctx, cluster)
@@ -67,6 +71,8 @@ func Register(ctx context.Context, cluster *config.UserContext, clusterRec *mana
 	globaldns.Register(ctx, cluster)
 	alert.Register(ctx, cluster)
 	monitoring.Register(ctx, cluster)
+	istio.Register(ctx, cluster)
+	certsexpiration.Register(ctx, cluster)
 
 	if clusterRec.Spec.LocalClusterAuthEndpoint.Enabled {
 		err := clusterauthtoken.CRDSetup(ctx, cluster.UserOnlyContext())

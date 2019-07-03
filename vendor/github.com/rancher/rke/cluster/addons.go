@@ -79,6 +79,7 @@ type KubeDNSOptions struct {
 	ClusterDNSServer       string
 	ReverseCIDRs           []string
 	UpstreamNameservers    []string
+	StubDomains            map[string][]string
 	NodeSelector           map[string]string
 }
 
@@ -157,14 +158,16 @@ func (c *Cluster) deployAddonsInclude(ctx context.Context) error {
 			log.Infof(ctx, "[addons] Adding addon from url %s", addon)
 			logrus.Debugf("URL Yaml: %s", addonYAML)
 
+			// make sure we properly separated manifests
+			addonYAMLStr := string(addonYAML)
+
+			formattedAddonYAML := formatAddonYAML(addonYAMLStr)
+
+			addonYAML = []byte(formattedAddonYAML)
+			logrus.Debugf("Formatted Yaml: %s", addonYAML)
+
 			if err := validateUserAddonYAML(addonYAML); err != nil {
 				return err
-			}
-
-			// Put 3 dashes (---) at beginning of next YAML if it is not there already so we can append to manifests
-			dashes := "---\n"
-			if !strings.HasPrefix(string(addonYAML[:]), dashes) {
-				addonYAML = append([]byte(dashes), addonYAML...)
 			}
 
 			manifests = append(manifests, addonYAML...)
@@ -178,9 +181,12 @@ func (c *Cluster) deployAddonsInclude(ctx context.Context) error {
 
 			// make sure we properly separated manifests
 			addonYAMLStr := string(addonYAML)
-			if !strings.HasPrefix(addonYAMLStr, "---") {
-				addonYAML = []byte(fmt.Sprintf("%s\n%s", "---", addonYAMLStr))
-			}
+
+			formattedAddonYAML := formatAddonYAML(addonYAMLStr)
+
+			addonYAML = []byte(formattedAddonYAML)
+			logrus.Debugf("Formatted Yaml: %s", addonYAML)
+
 			if err := validateUserAddonYAML(addonYAML); err != nil {
 				return err
 			}
@@ -193,6 +199,19 @@ func (c *Cluster) deployAddonsInclude(ctx context.Context) error {
 	logrus.Debugf("[addons] Compiled addons yaml: %s", string(manifests))
 
 	return c.doAddonDeploy(ctx, string(manifests), UserAddonsIncludeResourceName, false)
+}
+
+func formatAddonYAML(addonYAMLStr string) string {
+	if !strings.HasPrefix(addonYAMLStr, "---") {
+		logrus.Debug("Yaml does not start with dashes")
+		addonYAMLStr = fmt.Sprintf("%s\n%s", "---", addonYAMLStr)
+	}
+
+	if !strings.HasSuffix(addonYAMLStr, "\n") {
+		logrus.Debug("Yaml does not end with newline")
+		addonYAMLStr = fmt.Sprintf("%s\n", addonYAMLStr)
+	}
+	return addonYAMLStr
 }
 
 func validateUserAddonYAML(addon []byte) error {
@@ -239,6 +258,7 @@ func (c *Cluster) deployKubeDNS(ctx context.Context) error {
 		ClusterDNSServer:       c.ClusterDNSServer,
 		UpstreamNameservers:    c.DNS.UpstreamNameservers,
 		ReverseCIDRs:           c.DNS.ReverseCIDRs,
+		StubDomains:            c.DNS.StubDomains,
 		NodeSelector:           c.DNS.NodeSelector,
 	}
 	kubeDNSYaml, err := addons.GetKubeDNSManifest(KubeDNSConfig)

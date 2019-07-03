@@ -13,9 +13,9 @@ import (
 	"github.com/rancher/rancher/pkg/controllers/user/resourcequota"
 	namespaceutil "github.com/rancher/rancher/pkg/namespace"
 	"github.com/rancher/rancher/pkg/project"
-	"github.com/rancher/types/apis/management.cattle.io/v3"
+	v3 "github.com/rancher/types/apis/management.cattle.io/v3"
 	"github.com/sirupsen/logrus"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -166,7 +166,7 @@ func (n *nsLifecycle) ensurePRTBAddToNamespace(ns *v1.Namespace) (bool, error) {
 			return false, errors.Wrapf(err, "object %v is not valid project role template binding", prtb)
 		}
 
-		if prtb.UserName == "" && prtb.GroupPrincipalName == "" && prtb.GroupName == "" {
+		if prtb.UserName == "" && prtb.GroupPrincipalName == "" && prtb.GroupName == "" && prtb.ServiceAccount == "" {
 			continue
 		}
 

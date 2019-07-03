@@ -1,9 +1,8 @@
 package authn
 
 import (
-	"strings"
-
 	"context"
+	"strings"
 
 	"github.com/rancher/norman/httperror"
 	"github.com/rancher/norman/store/transform"
@@ -11,9 +10,10 @@ import (
 	"github.com/rancher/norman/types/values"
 	"github.com/rancher/rancher/pkg/auth/providers"
 	"github.com/rancher/rancher/pkg/auth/requests"
-	"github.com/rancher/types/client/management/v3"
+	client "github.com/rancher/types/client/management/v3"
 	"github.com/rancher/types/config"
 	"github.com/sirupsen/logrus"
+	"k8s.io/apimachinery/pkg/api/errors"
 )
 
 func SetRTBStore(ctx context.Context, schema *types.Schema, mgmt *config.ScaledContext) {
@@ -26,7 +26,9 @@ func SetRTBStore(ctx context.Context, schema *types.Schema, mgmt *config.ScaledC
 			if id, ok := data[client.ClusterRoleTemplateBindingFieldUserID].(string); ok && id != "" {
 				u, err := userLister.Get("", id)
 				if err != nil {
-					logrus.Errorf("problem retrieving user for CRTB %v from cache during CRTB transformation: %v", data, err)
+					if !errors.IsNotFound(err) {
+						logrus.Errorf("problem retrieving user for CRTB %v from cache during CRTB transformation: %v", data, err)
+					}
 					return data, nil
 				}
 

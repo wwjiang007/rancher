@@ -49,7 +49,7 @@ var aliases = map[string]map[string]string{
 	"azure":        map[string]string{"customData": "customData"},
 	"digitalocean": map[string]string{"sshKeyContents": "sshKeyPath", "userdata": "userdata"},
 	"exoscale":     map[string]string{"sshKey": "sshKey", "userdata": "userdata"},
-	"openstack":    map[string]string{"privateKeyFile": "privateKeyFile"},
+	"openstack":    map[string]string{"cacert": "cacert", "privateKeyFile": "privateKeyFile", "userDataFile": "userDataFile"},
 	"otc":          map[string]string{"privateKeyFile": "privateKeyFile"},
 	"packet":       map[string]string{"userdata": "userdata"},
 }
@@ -179,8 +179,7 @@ func (m *Lifecycle) Create(obj *v3.Node) (runtime.Object, error) {
 		if !m.devMode {
 			err := jailer.CreateJail(obj.Namespace)
 			if err != nil {
-				logrus.Debugf("Create jail error: %v", err)
-				return nil, err
+				return nil, errors.WithMessage(err, "node create jail error")
 			}
 		}
 		config, err := nodeconfig.NewNodeConfig(m.secretStore, obj)
@@ -219,8 +218,7 @@ func (m *Lifecycle) Remove(obj *v3.Node) (runtime.Object, error) {
 		if !m.devMode {
 			err := jailer.CreateJail(obj.Namespace)
 			if err != nil {
-				logrus.Debugf("Create jail error: %v", err)
-				return nil, err
+				return nil, errors.WithMessage(err, "node remove jail error")
 			}
 		}
 
@@ -323,7 +321,7 @@ func aliasToPath(driver string, config map[string]interface{}, ns string) error 
 				hasher.Write([]byte(fileContents))
 				sha := base32.StdEncoding.WithPadding(-1).EncodeToString(hasher.Sum(nil))[:10]
 				fullPath := path.Join(baseDir, sha)
-				err := ioutil.WriteFile(fullPath, []byte(fileContents), 0644)
+				err := ioutil.WriteFile(fullPath, []byte(fileContents), 0600)
 				if err != nil {
 					return err
 				}
@@ -420,8 +418,7 @@ func (m *Lifecycle) Updated(obj *v3.Node) (runtime.Object, error) {
 			logrus.Infof("Creating jail for %v", obj.Namespace)
 			err := jailer.CreateJail(obj.Namespace)
 			if err != nil {
-				logrus.Debugf("Create jail error: %v", err)
-				return nil, err
+				return nil, errors.WithMessage(err, "node update jail error")
 			}
 		}
 
@@ -450,7 +447,12 @@ func (m *Lifecycle) saveConfig(config *nodeconfig.NodeConfig, nodeDir string, ob
 		return obj, err
 	}
 
-	sshKey, err := getSSHKey(nodeDir, obj)
+	keyPath, err := config.SSHKeyPath()
+	if err != nil {
+		return obj, err
+	}
+
+	sshKey, err := getSSHKey(nodeDir, keyPath, obj)
 	if err != nil {
 		return obj, err
 	}

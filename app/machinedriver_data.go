@@ -6,10 +6,10 @@ import (
 	"strings"
 
 	"github.com/rancher/rancher/pkg/api/customization/nodetemplate"
-	"github.com/rancher/types/apis/management.cattle.io/v3"
+	v3 "github.com/rancher/types/apis/management.cattle.io/v3"
 	"github.com/rancher/types/config"
 	"github.com/sirupsen/logrus"
-	"k8s.io/apimachinery/pkg/apis/meta/v1"
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 var driverData = map[string]map[string][]string{
@@ -32,6 +32,10 @@ type machineDriverCompare struct {
 }
 
 func addMachineDrivers(management *config.ManagementContext) error {
+	if err := addMachineDriver("pinganyunecs", "https://machine-driver.oss-cn-shanghai.aliyuncs.com/pinganyun/v0.2.0/docker-machine-driver-pinganyunecs-linux.tgz",
+		"https://machine-driver.oss-cn-shanghai.aliyuncs.com/pinganyun/v0.1.0/ui/component.js", "b87c8ccb578357b2a26be744d8d05e1dbf2531e91119e03efb7383686f9e56fc", []string{"*.aliyuncs.com"}, false, false, management); err != nil {
+		return err
+	}
 	if err := addMachineDriver("aliyunecs", "http://machine-driver.oss-cn-shanghai.aliyuncs.com/aliyun/1.0.2/linux/amd64/docker-machine-driver-aliyunecs.tgz",
 		"", "c31b9da2c977e70c2eeee5279123a95d", []string{"ecs.aliyuncs.com"}, false, false, management); err != nil {
 		return err

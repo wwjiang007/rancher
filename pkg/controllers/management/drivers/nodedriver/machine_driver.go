@@ -2,7 +2,9 @@ package nodedriver
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os/exec"
 	"reflect"
 	"strconv"
 	"strings"
@@ -12,8 +14,8 @@ import (
 	"github.com/rancher/norman/types"
 	"github.com/rancher/norman/types/convert"
 	"github.com/rancher/rancher/pkg/controllers/management/drivers"
-	"github.com/rancher/types/apis/core/v1"
-	"github.com/rancher/types/apis/management.cattle.io/v3"
+	v1 "github.com/rancher/types/apis/core/v1"
+	v3 "github.com/rancher/types/apis/management.cattle.io/v3"
 	"github.com/rancher/types/config"
 	"github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -32,14 +34,15 @@ var (
 		"azure":        map[string]string{"customData": "customData"},
 		"digitalocean": map[string]string{"sshKeyPath": "sshKeyContents", "userdata": "userdata"},
 		"exoscale":     map[string]string{"sshKey": "sshKey", "userdata": "userdata"},
-		"openstack":    map[string]string{"privateKeyFile": "privateKeyFile"},
+		"openstack":    map[string]string{"cacert": "cacert", "privateKeyFile": "privateKeyFile", "userDataFile": "userDataFile"},
 		"otc":          map[string]string{"privateKeyFile": "privateKeyFile"},
 		"packet":       map[string]string{"userdata": "userdata"},
 	}
 )
 
 const (
-	driverNameLabel = "io.cattle.node_driver.name"
+	driverNameLabel  = "io.cattle.node_driver.name"
+	uiFieldHintsAnno = "io.cattle.nodedriver/ui-field-hints"
 )
 
 func Register(ctx context.Context, management *config.ManagementContext) {
@@ -53,17 +56,23 @@ func Register(ctx context.Context, management *config.ManagementContext) {
 		schemas:          management.Schemas,
 	}
 
-	nodeDriverClient.
-		AddLifecycle(ctx, "node-driver-controller", nodeDriverLifecycle)
+	version, err := getDockerMachineVersion()
+	if err != nil {
+		logrus.Warnf("error getting docker-machine version: %v", err)
+	}
+	nodeDriverLifecycle.dockerMachineVersion = version
+
+	nodeDriverClient.AddLifecycle(ctx, "node-driver-controller", nodeDriverLifecycle)
 }
 
 type Lifecycle struct {
-	nodeDriverClient v3.NodeDriverInterface
-	schemaClient     v3.DynamicSchemaInterface
-	schemaLister     v3.DynamicSchemaLister
-	secretStore      v1.SecretInterface
-	nsStore          v1.NamespaceInterface
-	schemas          *types.Schemas
+	nodeDriverClient     v3.NodeDriverInterface
+	schemaClient         v3.DynamicSchemaInterface
+	schemaLister         v3.DynamicSchemaLister
+	secretStore          v1.SecretInterface
+	nsStore              v1.NamespaceInterface
+	schemas              *types.Schemas
+	dockerMachineVersion string
 }
 
 func (m *Lifecycle) Create(obj *v3.NodeDriver) (runtime.Object, error) {
@@ -77,6 +86,8 @@ func (m *Lifecycle) download(obj *v3.NodeDriver) (*v3.NodeDriver, error) {
 		return obj, nil
 	}
 
+	forceUpdate := m.checkDriverVersion(obj)
+
 	err := errs.New("not found")
 	// if node driver was created, we also activate the driver by default
 	driver := drivers.NewDynamicDriver(obj.Spec.Builtin, obj.Spec.DisplayName, obj.Spec.URL, obj.Spec.Checksum)
@@ -86,7 +97,7 @@ func (m *Lifecycle) download(obj *v3.NodeDriver) (*v3.NodeDriver, error) {
 		existingSchema, err = m.schemaLister.Get("", schemaName)
 	}
 
-	if driver.Exists() && err == nil {
+	if driver.Exists() && err == nil && !forceUpdate {
 		// add credential schema
 		credFields := map[string]v3.Field{}
 		if err != nil {
@@ -109,7 +120,7 @@ func (m *Lifecycle) download(obj *v3.NodeDriver) (*v3.NodeDriver, error) {
 		return m.createCredSchema(obj, credFields)
 	}
 
-	if !driver.Exists() {
+	if !driver.Exists() || forceUpdate {
 		v3.NodeDriverConditionDownloaded.Unknown(obj)
 		v3.NodeDriverConditionInstalled.Unknown(obj)
 	}
@@ -121,7 +132,7 @@ func (m *Lifecycle) download(obj *v3.NodeDriver) (*v3.NodeDriver, error) {
 			return nil, err
 		}
 
-		if err := driver.Stage(); err != nil {
+		if err := driver.Stage(forceUpdate); err != nil {
 			return nil, err
 		}
 		return obj, nil
@@ -135,7 +146,7 @@ func (m *Lifecycle) download(obj *v3.NodeDriver) (*v3.NodeDriver, error) {
 		if err := driver.Install(); err != nil {
 			return nil, err
 		}
-		if err = driver.Excutable(); err != nil {
+		if err = driver.Executable(); err != nil {
 			return nil, err
 		}
 		obj.Spec.DisplayName = strings.TrimPrefix(driver.Name(), drivers.DockerMachineDriverPrefix)
@@ -147,6 +158,14 @@ func (m *Lifecycle) download(obj *v3.NodeDriver) (*v3.NodeDriver, error) {
 
 	obj = newObj.(*v3.NodeDriver)
 	driverName := strings.TrimPrefix(driver.Name(), drivers.DockerMachineDriverPrefix)
+
+	obj = m.addVersionInfo(obj)
+
+	obj, err = m.addUIHintsAnno(driverName, obj)
+	if err != nil {
+		return obj, errs.Wrap(err, "failed JSON in addUIHintsAnno")
+	}
+
 	flags, err := getCreateFlagsForDriver(driverName)
 	if err != nil {
 		return nil, err
@@ -197,10 +216,24 @@ func (m *Lifecycle) download(obj *v3.NodeDriver) (*v3.NodeDriver, error) {
 	}
 	dynamicSchema.Labels = map[string]string{}
 	dynamicSchema.Labels[driverNameLabel] = obj.Spec.DisplayName
+
 	_, err = m.schemaClient.Create(dynamicSchema)
-	if err != nil && !errors.IsAlreadyExists(err) {
-		return obj, err
+	if err != nil {
+		if !errors.IsAlreadyExists(err) {
+			return obj, err
+		}
+		ds, err := m.schemaClient.Get(dynamicSchema.Name, metav1.GetOptions{})
+		if err != nil {
+			return obj, err
+		}
+		ds.Spec.ResourceFields = resourceFields
+
+		_, err = m.schemaClient.Update(ds)
+		if err != nil {
+			return obj, err
+		}
 	}
+
 	return m.createCredSchema(obj, credFields)
 }
 
@@ -234,6 +267,68 @@ func (m *Lifecycle) createCredSchema(obj *v3.NodeDriver, credFields map[string]v
 		if err != nil {
 			return obj, err
 		}
+	}
+	return obj, nil
+}
+
+func (m *Lifecycle) checkDriverVersion(obj *v3.NodeDriver) bool {
+	if v3.NodeDriverConditionDownloaded.IsUnknown(obj) || v3.NodeDriverConditionInstalled.IsUnknown(obj) {
+		return true
+	}
+
+	driverName := strings.TrimPrefix(obj.Spec.DisplayName, drivers.DockerMachineDriverPrefix)
+
+	if _, ok := Aliases[driverName]; ok {
+		if val, ok := obj.Annotations[uiFieldHintsAnno]; !ok || val == "" {
+			return true
+		}
+	}
+
+	// Builtin drivers use the docker-machine version to validate against
+	if obj.Spec.Builtin {
+		if obj.Status.AppliedDockerMachineVersion != m.dockerMachineVersion {
+			return true
+		}
+		return false
+	}
+
+	if obj.Spec.URL != obj.Status.AppliedURL || obj.Spec.Checksum != obj.Status.AppliedChecksum {
+		return true
+	}
+
+	return false
+}
+
+func (m *Lifecycle) addVersionInfo(obj *v3.NodeDriver) *v3.NodeDriver {
+	if obj.Spec.Builtin {
+		obj.Status.AppliedDockerMachineVersion = m.dockerMachineVersion
+	} else {
+		obj.Status.AppliedURL = obj.Spec.URL
+		obj.Status.AppliedChecksum = obj.Spec.Checksum
+	}
+	return obj
+}
+
+func (m *Lifecycle) addUIHintsAnno(driverName string, obj *v3.NodeDriver) (*v3.NodeDriver, error) {
+	if aliases, ok := Aliases[driverName]; ok {
+		anno := make(map[string]map[string]string)
+
+		for _, aliased := range aliases {
+			anno[aliased] = map[string]string{
+				"type": "multiline",
+			}
+		}
+
+		jsonAnno, err := json.Marshal(anno)
+		if err != nil {
+			return obj, err
+		}
+
+		if obj.Annotations == nil {
+			obj.Annotations = make(map[string]string)
+		}
+
+		obj.Annotations[uiFieldHintsAnno] = string(jsonAnno)
 	}
 	return obj, nil
 }
@@ -404,4 +499,10 @@ func updateDefault(credField v3.Field, val, kind string) v3.Field {
 		logrus.Errorf("unsupported kind for default val:%s kind:%s", val, kind)
 	}
 	return credField
+}
+
+func getDockerMachineVersion() (string, error) {
+	cmd := exec.Command("docker-machine", "--version")
+	out, err := cmd.CombinedOutput()
+	return string(out), err
 }

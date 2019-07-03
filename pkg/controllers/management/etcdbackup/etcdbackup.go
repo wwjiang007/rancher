@@ -2,7 +2,12 @@ package etcdbackup
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
+	"net/http"
+	"net/url"
+	"path"
 	"strings"
 	"time"
 
@@ -26,6 +31,7 @@ import (
 
 const (
 	clusterBackupCheckInterval = 5 * time.Minute
+	compressedExtension        = "zip"
 	s3Endpoint                 = "s3.amazonaws.com"
 )
 
@@ -84,7 +90,7 @@ func (c *Controller) Create(b *v3.EtcdBackup) (runtime.Object, error) {
 	}
 
 	if !v3.BackupConditionCreated.IsTrue(b) {
-		b.Spec.Filename = getBackupFilename(b.Name, cluster)
+		b.Spec.Filename = getBackupURL(b.Name, cluster)
 		b.Spec.BackupConfig = *cluster.Spec.RancherKubernetesEngineConfig.Services.Etcd.BackupConfig
 		v3.BackupConditionCreated.True(b)
 		// we set ConditionCompleted to Unknown to avoid incorrect "active" state
@@ -107,7 +113,7 @@ func (c *Controller) Create(b *v3.EtcdBackup) (runtime.Object, error) {
 }
 
 func (c *Controller) Remove(b *v3.EtcdBackup) (runtime.Object, error) {
-	logrus.Infof("[etcd-backup] Deleteing backup %s ", b.Name)
+	logrus.Infof("[etcd-backup] Deleting backup %s ", b.Name)
 	if err := c.etcdRemoveSnapshotWithBackoff(b); err != nil {
 		logrus.Warnf("giving up on deleting backup [%s]: %v", b.Name, err)
 	}
@@ -305,22 +311,48 @@ func NewBackupObject(cluster *v3.Cluster, manual bool) *v3.EtcdBackup {
 	}
 }
 
-func getBackupFilename(snapshotName string, cluster *v3.Cluster) string {
+func getBackupURL(snapshotName string, cluster *v3.Cluster) string {
 	if cluster.Spec.RancherKubernetesEngineConfig.Services.Etcd.BackupConfig == nil ||
 		cluster.Spec.RancherKubernetesEngineConfig.Services.Etcd.BackupConfig.S3BackupConfig == nil {
 		return ""
 	}
 	target := cluster.Spec.RancherKubernetesEngineConfig.Services.Etcd.BackupConfig.S3BackupConfig
-	return fmt.Sprintf("https://s3.%s.amazonaws.com/%s/%s", target.Region, target.BucketName, snapshotName)
+	return fmt.Sprintf("https://%s/%s/%s.%s", target.Endpoint, target.BucketName, snapshotName, compressedExtension)
+}
+
+func getBackupFilenameFromURL(URL string) (string, error) {
+	if !isValidURL(URL) {
+		return "", fmt.Errorf("URL is not valid: [%s]", URL)
+	}
+	parsedURL, err := url.Parse(URL)
+	if err != nil {
+		return "", err
+	}
+	if parsedURL.Path == "" {
+		return "", fmt.Errorf("No path found in URL: [%s]", URL)
+	}
+	extractedPath := path.Base(parsedURL.Path)
+	return extractedPath, nil
+}
+
+// isValidURL tests a string to determine if it is a url or not.
+// https://golangcode.com/how-to-check-if-a-string-is-a-url/
+func isValidURL(URL string) bool {
+	_, err := url.ParseRequestURI(URL)
+	if err != nil {
+		return false
+	}
+	return true
 }
 
 func (c *Controller) deleteS3Snapshot(b *v3.EtcdBackup) error {
 	if b.Spec.BackupConfig.S3BackupConfig == nil {
-		return fmt.Errorf("can't find S3 backup target configuration")
+		return fmt.Errorf("Can't find S3 backup target configuration")
 	}
 	var err error
 	var s3Client = &minio.Client{}
-	var creds = &credentials.Credentials{}
+	var creds *credentials.Credentials
+	var tr = &http.Transport{}
 	endpoint := b.Spec.BackupConfig.S3BackupConfig.Endpoint
 	bucketLookup := getBucketLookupType(endpoint)
 	bucket := b.Spec.BackupConfig.S3BackupConfig.BucketName
@@ -345,17 +377,29 @@ func (c *Controller) deleteS3Snapshot(b *v3.EtcdBackup) error {
 	if err != nil {
 		return err
 	}
+	if b.Spec.BackupConfig.S3BackupConfig.CustomCA != "" {
+		tr = getCustomCATransport(b.Spec.BackupConfig.S3BackupConfig.CustomCA)
+		s3Client.SetCustomTransport(tr)
+	}
 
-	exists, err := s3Client.BucketExists(bucket)
+	bucketExists, err := s3Client.BucketExists(bucket)
 	if err != nil {
 		return fmt.Errorf("can't access bucket: %v", err)
 	}
-	if !exists {
+	if !bucketExists {
 		logrus.Errorf("bucket %s doesn't exist", bucket)
 		return nil
 	}
 
-	return s3Client.RemoveObject(bucket, b.Name)
+	// Extract filename from etcdBackup.Spec.Filename
+	var fileName string
+	fileName, err = getBackupFilenameFromURL(b.Spec.Filename)
+	if err != nil {
+		logrus.Warningf("Could not get filename from [%s]: %v. Using %s as fallback", b.Spec.Filename, err, b.Name)
+		fileName = b.Name
+	}
+
+	return s3Client.RemoveObject(bucket, fileName)
 }
 
 func (c *Controller) getRecuringBackupsList(cluster *v3.Cluster) ([]*v3.EtcdBackup, error) {
@@ -436,5 +480,16 @@ func isBackupSet(rkeConfig *v3.RancherKubernetesEngineConfig) bool {
 }
 
 func isRecurringBackupEnabled(rkeConfig *v3.RancherKubernetesEngineConfig) bool {
-	return isBackupSet(rkeConfig) && *rkeConfig.Services.Etcd.BackupConfig.Enabled
+	return isBackupSet(rkeConfig) && rkeConfig.Services.Etcd.BackupConfig.Enabled != nil && *rkeConfig.Services.Etcd.BackupConfig.Enabled
+}
+
+func getCustomCATransport(ca string) *http.Transport {
+	certPool := x509.NewCertPool()
+	certPool.AppendCertsFromPEM([]byte(ca))
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			RootCAs: certPool,
+		},
+	}
+	return tr
 }

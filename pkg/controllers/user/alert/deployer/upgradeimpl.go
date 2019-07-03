@@ -14,8 +14,8 @@ import (
 	"github.com/rancher/rancher/pkg/namespace"
 	"github.com/rancher/rancher/pkg/ref"
 	"github.com/rancher/rancher/pkg/settings"
-	"github.com/rancher/types/apis/core/v1"
-	"github.com/rancher/types/apis/management.cattle.io/v3"
+	v1 "github.com/rancher/types/apis/core/v1"
+	v3 "github.com/rancher/types/apis/management.cattle.io/v3"
 	projectv3 "github.com/rancher/types/apis/project.cattle.io/v3"
 	"github.com/rancher/types/config"
 
@@ -89,9 +89,6 @@ func (l *alertService) Upgrade(currentVersion string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if currentVersion == NewVersion {
-		return currentVersion, nil
-	}
 
 	appName, _ := monitorutil.ClusterAlertManagerInfo()
 	//migrate legacy
@@ -132,6 +129,7 @@ func (l *alertService) Upgrade(currentVersion string) (string, error) {
 	}
 	newApp := app.DeepCopy()
 	newApp.Spec.ExternalID = newCatalogID
+	newApp.Spec.Answers["operator.enabled"] = "false"
 
 	if !reflect.DeepEqual(newApp, app) {
 		if _, err = l.apps.Update(newApp); err != nil {

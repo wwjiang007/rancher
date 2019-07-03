@@ -24,7 +24,7 @@ import (
 	rkehosts "github.com/rancher/rke/hosts"
 	rkepki "github.com/rancher/rke/pki"
 	rkeservices "github.com/rancher/rke/services"
-	"github.com/rancher/types/apis/management.cattle.io/v3"
+	v3 "github.com/rancher/types/apis/management.cattle.io/v3"
 	"github.com/rancher/types/config"
 	"github.com/sirupsen/logrus"
 )
@@ -476,7 +476,6 @@ func createWindowsProcesses(rkeConfig *v3.RancherKubernetesEngineConfig, configN
 		"register-with-taints":         "beta.kubernetes.io/os=windows:PreferNoSchedule",
 		"client-ca-file":               "c:" + rkepki.GetCertPath(rkepki.CACertName),
 		"kubeconfig":                   "c:" + rkepki.GetConfigPath(rkepki.KubeNodeCertName),
-		"hostname-override":            configNode.HostnameOverride,
 		"cluster-domain":               clusterDomain,
 		"cluster-dns":                  dnsServiceIP,
 		"node-ip":                      configNode.InternalAddress,
@@ -489,10 +488,9 @@ func createWindowsProcesses(rkeConfig *v3.RancherKubernetesEngineConfig, configN
 		"authentication-token-webhook": "true",
 	}, serviceOptions.Kubelet)
 	extendingKubeproxyOptions := extendMap(map[string]string{
-		"v":                 "2",
-		"proxy-mode":        "kernelspace",
-		"kubeconfig":        "c:" + rkepki.GetConfigPath(rkepki.KubeProxyCertName),
-		"hostname-override": configNode.HostnameOverride,
+		"v":          "2",
+		"proxy-mode": "kernelspace",
+		"kubeconfig": "c:" + rkepki.GetConfigPath(rkepki.KubeProxyCertName),
 	}, serviceOptions.Kubeproxy)
 
 	flannelBackendConfig := map[string]interface{}{}
