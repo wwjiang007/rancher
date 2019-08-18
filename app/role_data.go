@@ -32,7 +32,8 @@ func addRoles(management *config.ManagementContext) (string, error) {
 		addRule().apiGroups("management.cattle.io").resources("podsecuritypolicytemplates").verbs("get", "list", "watch").
 		addRule().apiGroups("management.cattle.io").resources("nodetemplates").verbs("*").
 		addRule().apiGroups("*").resources("secrets").verbs("create").
-		addRule().apiGroups("management.cattle.io").resources("etcdbackups").verbs("get", "list", "watch")
+		addRule().apiGroups("management.cattle.io").resources("etcdbackups").verbs("get", "list", "watch").
+		addRule().apiGroups("management.cattle.io").resources("clusterscans").verbs("get", "list", "watch")
 
 	rb.addRole("Manage Node Drivers", "nodedrivers-manage").addRule().apiGroups("management.cattle.io").resources("nodedrivers").verbs("*")
 	rb.addRole("Manage Cluster Drivers", "kontainerdrivers-manage").addRule().apiGroups("management.cattle.io").resources("kontainerdrivers").verbs("*")
@@ -45,6 +46,8 @@ func addRoles(management *config.ManagementContext) (string, error) {
 	rb.addRole("Manage Settings", "settings-manage").addRule().apiGroups("management.cattle.io").resources("settings").verbs("*")
 	rb.addRole("Manage Features", "features-manage").addRule().apiGroups("management.cattle.io").resources("features").verbs("get", "list", "watch", "update")
 	rb.addRole("Manage PodSecurityPolicy Templates", "podsecuritypolicytemplates-manage").addRule().apiGroups("management.cattle.io").resources("podsecuritypolicytemplates").verbs("*")
+	rb.addRole("Manage Cluster Scans", "clusterscans-manage").addRule().apiGroups("management.cattle.io").resources("clusterscans").verbs("*")
+	rb.addRole("Create Cluster Templates", "clustertemplates-create").addRule().apiGroups("management.cattle.io").resources("clustertemplates", "clustertemplaterevisions").verbs("create")
 
 	rb.addRole("Admin", "admin").addRule().apiGroups("*").resources("*").verbs("*").
 		addRule().apiGroups().nonResourceURLs("*").verbs("*")
@@ -60,14 +63,18 @@ func addRoles(management *config.ManagementContext) (string, error) {
 		addRule().apiGroups("management.cattle.io").resources("podsecuritypolicytemplates").verbs("get", "list", "watch").
 		addRule().apiGroups("management.cattle.io").resources("nodetemplates").verbs("*").
 		addRule().apiGroups("*").resources("secrets").verbs("create").
-		addRule().apiGroups("management.cattle.io").resources("multiclusterapps", "globaldnses", "globaldnsproviders", "clustertemplates", "clustertemplaterevisions").verbs("create").
+		addRule().apiGroups("management.cattle.io").resources("multiclusterapps", "globaldnses", "globaldnsproviders").verbs("create").
 		addRule().apiGroups("project.cattle.io").resources("sourcecodecredentials").verbs("*").
 		addRule().apiGroups("project.cattle.io").resources("sourcecoderepositories").verbs("*").
-		addRule().apiGroups("management.cattle.io").resources("etcdbackups").verbs("get", "list", "watch")
+		addRule().apiGroups("management.cattle.io").resources("rkek8ssystemimages").verbs("get", "list", "watch").
+		addRule().apiGroups("management.cattle.io").resources("rkek8sserviceoptions").verbs("get", "list", "watch").
+		addRule().apiGroups("management.cattle.io").resources("rkeaddons").verbs("get", "list", "watch")
 
 	rb.addRole("User Base", "user-base").addRule().apiGroups("management.cattle.io").resources("preferences").verbs("*").
 		addRule().apiGroups("management.cattle.io").resources("settings").verbs("get", "list", "watch").
-		addRule().apiGroups("management.cattle.io").resources("features").verbs("get", "list", "watch")
+		addRule().apiGroups("management.cattle.io").resources("features").verbs("get", "list", "watch").
+		addRule().apiGroups("project.cattle.io").resources("sourcecodecredentials").verbs("*").
+		addRule().apiGroups("project.cattle.io").resources("sourcecoderepositories").verbs("*")
 
 	// TODO user should be dynamically authorized to only see herself
 	// TODO Need "self-service" for nodetemplates such that a user can create them, but only RUD their own
@@ -98,6 +105,7 @@ func addRoles(management *config.ManagementContext) (string, error) {
 		addRule().apiGroups("*").resources("nodes").verbs("get", "list", "watch").
 		addRule().apiGroups("*").resources("persistentvolumes").verbs("get", "list", "watch").
 		addRule().apiGroups("*").resources("storageclasses").verbs("get", "list", "watch").
+		addRule().apiGroups("*").resources("apiservices").verbs("get", "list", "watch").
 		addRule().apiGroups("management.cattle.io").resources("clusterevents").verbs("get", "list", "watch").
 		addRule().apiGroups("management.cattle.io").resources("clusterloggings").verbs("get", "list", "watch").
 		addRule().apiGroups("management.cattle.io").resources("clusteralertrules").verbs("get", "list", "watch").
@@ -116,6 +124,7 @@ func addRoles(management *config.ManagementContext) (string, error) {
 		addRule().apiGroups("management.cattle.io").resources("projects").verbs("get", "list", "watch").
 		addRule().apiGroups("management.cattle.io").resources("projectroletemplatebindings").verbs("get", "list", "watch").
 		addRule().apiGroups("project.cattle.io").resources("apps").verbs("get", "list", "watch").
+		addRule().apiGroups("project.cattle.io").resources("apprevisions").verbs("get", "list", "watch").
 		addRule().apiGroups("").resources("namespaces").verbs("get", "list", "watch").
 		addRule().apiGroups("*").resources("persistentvolumes").verbs("get", "list", "watch").
 		addRule().apiGroups("*").resources("storageclasses").verbs("get", "list", "watch").
@@ -153,10 +162,14 @@ func addRoles(management *config.ManagementContext) (string, error) {
 	rb.addRoleTemplate("Manage Cluster Backups", "backups-manage", "cluster", true, false, false, false).
 		addRule().apiGroups("management.cattle.io").resources("etcdbackups").verbs("*")
 
+	rb.addRoleTemplate("Manage Cluster Scans", "clusterscans-manage", "cluster", true, false, false, false).
+		addRule().apiGroups("management.cattle.io").resources("clusterscans").verbs("*")
+
 	// Project roles
 	rb.addRoleTemplate("Project Owner", "project-owner", "project", true, false, false, false).
 		addRule().apiGroups("management.cattle.io").resources("projectroletemplatebindings").verbs("*").
 		addRule().apiGroups("project.cattle.io").resources("apps").verbs("*").
+		addRule().apiGroups("project.cattle.io").resources("apprevisions").verbs("*").
 		addRule().apiGroups("project.cattle.io").resources("pipelines").verbs("*").
 		addRule().apiGroups("project.cattle.io").resources("pipelineexecutions").verbs("*").
 		addRule().apiGroups("project.cattle.io").resources("pipelinesettings").verbs("*").
@@ -164,6 +177,7 @@ func addRoles(management *config.ManagementContext) (string, error) {
 		addRule().apiGroups("").resources("namespaces").verbs("create").
 		addRule().apiGroups("*").resources("persistentvolumes").verbs("get", "list", "watch").
 		addRule().apiGroups("*").resources("storageclasses").verbs("get", "list", "watch").
+		addRule().apiGroups("*").resources("apiservices").verbs("get", "list", "watch").
 		addRule().apiGroups("*").resources("persistentvolumeclaims").verbs("*").
 		addRule().apiGroups("metrics.k8s.io").resources("pods").verbs("*").
 		addRule().apiGroups("management.cattle.io").resources("clusterevents").verbs("get", "list", "watch").
@@ -187,11 +201,13 @@ func addRoles(management *config.ManagementContext) (string, error) {
 	rb.addRoleTemplate("Project Member", "project-member", "project", true, false, false, false).
 		addRule().apiGroups("management.cattle.io").resources("projectroletemplatebindings").verbs("get", "list", "watch").
 		addRule().apiGroups("project.cattle.io").resources("apps").verbs("*").
+		addRule().apiGroups("project.cattle.io").resources("apprevisions").verbs("*").
 		addRule().apiGroups("project.cattle.io").resources("pipelines").verbs("*").
 		addRule().apiGroups("project.cattle.io").resources("pipelineexecutions").verbs("*").
 		addRule().apiGroups("").resources("namespaces").verbs("create").
 		addRule().apiGroups("*").resources("persistentvolumes").verbs("get", "list", "watch").
 		addRule().apiGroups("*").resources("storageclasses").verbs("get", "list", "watch").
+		addRule().apiGroups("*").resources("apiservices").verbs("get", "list", "watch").
 		addRule().apiGroups("*").resources("persistentvolumeclaims").verbs("*").
 		addRule().apiGroups("metrics.k8s.io").resources("pods").verbs("*").
 		addRule().apiGroups("management.cattle.io").resources("clusterevents").verbs("get", "list", "watch").
@@ -215,10 +231,12 @@ func addRoles(management *config.ManagementContext) (string, error) {
 	rb.addRoleTemplate("Read-only", "read-only", "project", true, false, false, false).
 		addRule().apiGroups("management.cattle.io").resources("projectroletemplatebindings").verbs("get", "list", "watch").
 		addRule().apiGroups("project.cattle.io").resources("apps").verbs("get", "list", "watch").
+		addRule().apiGroups("project.cattle.io").resources("apprevisions").verbs("get", "list", "watch").
 		addRule().apiGroups("project.cattle.io").resources("pipelines").verbs("get", "list", "watch").
 		addRule().apiGroups("project.cattle.io").resources("pipelineexecutions").verbs("get", "list", "watch").
 		addRule().apiGroups("*").resources("persistentvolumes").verbs("get", "list", "watch").
 		addRule().apiGroups("*").resources("storageclasses").verbs("get", "list", "watch").
+		addRule().apiGroups("*").resources("apiservices").verbs("get", "list", "watch").
 		addRule().apiGroups("*").resources("persistentvolumeclaims").verbs("get", "list", "watch").
 		addRule().apiGroups("metrics.k8s.io").resources("pods").verbs("get", "list", "watch").
 		addRule().apiGroups("management.cattle.io").resources("clusterevents").verbs("get", "list", "watch").
@@ -246,6 +264,7 @@ func addRoles(management *config.ManagementContext) (string, error) {
 		"replicasets", "replicasets/scale", "replicationcontrollers/scale", "horizontalpodautoscalers").verbs("*").
 		addRule().apiGroups("*").resources("limitranges", "pods/log", "pods/status", "replicationcontrollers/status", "resourcequotas", "resourcequotas/status", "bindings").verbs("get", "list", "watch").
 		addRule().apiGroups("project.cattle.io").resources("apps").verbs("*").
+		addRule().apiGroups("project.cattle.io").resources("apprevisions").verbs("*").
 		addRule().apiGroups("management.cattle.io").resources("projectmonitorgraphs").verbs("get", "list", "watch")
 
 	rb.addRoleTemplate("View Workloads", "workloads-view", "project", true, false, false, false).
@@ -255,6 +274,7 @@ func addRoles(management *config.ManagementContext) (string, error) {
 		"replicasets", "replicasets/scale", "replicationcontrollers/scale", "horizontalpodautoscalers").verbs("get", "list", "watch").
 		addRule().apiGroups("*").resources("limitranges", "pods/log", "pods/status", "replicationcontrollers/status", "resourcequotas", "resourcequotas/status", "bindings").verbs("get", "list", "watch").
 		addRule().apiGroups("project.cattle.io").resources("apps").verbs("get", "list", "watch").
+		addRule().apiGroups("project.cattle.io").resources("apprevisions").verbs("get", "list", "watch").
 		addRule().apiGroups("management.cattle.io").resources("projectmonitorgraphs").verbs("get", "list", "watch")
 
 	rb.addRoleTemplate("Manage Ingress", "ingress-manage", "project", true, false, false, false).

@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"os"
 	"reflect"
 	"strings"
 
@@ -15,6 +16,7 @@ import (
 var driverData = map[string]map[string][]string{
 	nodetemplate.Amazonec2driver: {"cred": []string{"accessKey"}},
 	nodetemplate.Azuredriver:     {"cred": []string{"clientId", "subscriptionId"}},
+	nodetemplate.Linodedriver:    {"password": []string{"token"}},
 	nodetemplate.Vmwaredriver:    {"cred": []string{"username", "vcenter", "vcenterPort"}},
 }
 var driverDefaults = map[string]map[string]string{
@@ -32,15 +34,18 @@ type machineDriverCompare struct {
 }
 
 func addMachineDrivers(management *config.ManagementContext) error {
-	if err := addMachineDriver("pinganyunecs", "https://machine-driver.oss-cn-shanghai.aliyuncs.com/pinganyun/v0.2.0/docker-machine-driver-pinganyunecs-linux.tgz",
-		"https://machine-driver.oss-cn-shanghai.aliyuncs.com/pinganyun/v0.1.0/ui/component.js", "b87c8ccb578357b2a26be744d8d05e1dbf2531e91119e03efb7383686f9e56fc", []string{"*.aliyuncs.com"}, false, false, management); err != nil {
+	if err := addMachineDriver("pinganyunecs", "https://machine-driver.oss-cn-shanghai.aliyuncs.com/pinganyun/v0.3.0/linux/amd64/docker-machine-driver-pinganyunecs-linux.tgz",
+		"https://machine-driver.oss-cn-shanghai.aliyuncs.com/pinganyun/v0.3.0/ui/component.js", "f84ccec11c2c1970d76d30150916933efe8ca49fe4c422c8954fc37f71273bb5",
+		[]string{"machine-driver.oss-cn-shanghai.aliyuncs.com"}, false, false, management); err != nil {
 		return err
 	}
 	if err := addMachineDriver("aliyunecs", "http://machine-driver.oss-cn-shanghai.aliyuncs.com/aliyun/1.0.2/linux/amd64/docker-machine-driver-aliyunecs.tgz",
 		"", "c31b9da2c977e70c2eeee5279123a95d", []string{"ecs.aliyuncs.com"}, false, false, management); err != nil {
 		return err
 	}
-	if err := addMachineDriver(nodetemplate.Amazonec2driver, "local://", "", "", []string{"*.amazonaws.com", "*.amazonaws.com.cn"}, true, true, management); err != nil {
+	if err := addMachineDriver(nodetemplate.Amazonec2driver, "local://", "", "",
+		[]string{"iam.amazonaws.com", "iam.%.amazonaws.com.cn", "ec2.%.amazonaws.com", "ec2.%.amazonaws.com.cn"},
+		true, true, management); err != nil {
 		return err
 	}
 	if err := addMachineDriver(nodetemplate.Azuredriver, "local://", "", "", nil, true, true, management); err != nil {
@@ -57,16 +62,19 @@ func addMachineDrivers(management *config.ManagementContext) error {
 	if err := addMachineDriver("exoscale", "local://", "", "", []string{"api.exoscale.ch"}, false, true, management); err != nil {
 		return err
 	}
-	if err := addMachineDriver("linode", "https://github.com/linode/docker-machine-driver-linode/releases/download/v0.1.7/docker-machine-driver-linode_linux-amd64.zip",
-		"https://linode.github.io/rancher-ui-driver-linode/releases/v0.2.0/component.js", "faaf1d7d53b55a369baeeb0855b069921a36131868fe3641eb595ac1ff4cf16f",
-		[]string{"linode.github.io"}, false, false, management); err != nil {
+	linodeBuiltin := true
+	if dl := os.Getenv("CATTLE_DEV_MODE"); dl != "" {
+		linodeBuiltin = false
+	}
+	if err := addMachineDriver(nodetemplate.Linodedriver, "https://github.com/linode/docker-machine-driver-linode/releases/download/v0.1.8/docker-machine-driver-linode_linux-amd64.zip",
+		"/assets/rancher-ui-driver-linode/component.js", "b31b6a504c59ee758d2dda83029fe4a85b3f5601e22dfa58700a5e6c8f450dc7", []string{"api.linode.com"}, linodeBuiltin, linodeBuiltin, management); err != nil {
 		return err
 	}
 	if err := addMachineDriver("openstack", "local://", "", "", nil, false, true, management); err != nil {
 		return err
 	}
 	if err := addMachineDriver("otc", "https://github.com/rancher-plugins/docker-machine-driver-otc/releases/download/v2019.5.7/docker-machine-driver-otc",
-		"", "3f793ebb0ebd9477b9166ec542f77e25", []string{"*.otc.t-systems.com"}, false, false, management); err != nil {
+		"", "3f793ebb0ebd9477b9166ec542f77e25", nil, false, false, management); err != nil {
 		return err
 	}
 	if err := addMachineDriver("packet", "https://github.com/packethost/docker-machine-driver-packet/releases/download/v0.1.4/docker-machine-driver-packet_linux-amd64.zip",

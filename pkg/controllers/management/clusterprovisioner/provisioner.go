@@ -3,6 +3,8 @@ package clusterprovisioner
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"path"
 	"reflect"
 	"sort"
 	"strings"
@@ -15,6 +17,7 @@ import (
 	"github.com/rancher/norman/types/convert"
 	"github.com/rancher/norman/types/slice"
 	"github.com/rancher/norman/types/values"
+	kd "github.com/rancher/rancher/pkg/controllers/management/kontainerdrivermetadata"
 	"github.com/rancher/rancher/pkg/ref"
 	"github.com/rancher/rancher/pkg/rkedialerfactory"
 	"github.com/rancher/rancher/pkg/settings"
@@ -44,6 +47,8 @@ type Provisioner struct {
 	KontainerDriverLister v3.KontainerDriverLister
 	DynamicSchemasLister  v3.DynamicSchemaLister
 	Backups               v3.EtcdBackupLister
+	RKESystemImages       v3.RKEK8sSystemImageInterface
+	RKESystemImagesLister v3.RKEK8sSystemImageLister
 }
 
 func Register(ctx context.Context, management *config.ManagementContext) {
@@ -56,6 +61,8 @@ func Register(ctx context.Context, management *config.ManagementContext) {
 		KontainerDriverLister: management.Management.KontainerDrivers("").Controller().Lister(),
 		DynamicSchemasLister:  management.Management.DynamicSchemas("").Controller().Lister(),
 		Backups:               management.Management.EtcdBackups("").Controller().Lister(),
+		RKESystemImagesLister: management.Management.RKEK8sSystemImages("").Controller().Lister(),
+		RKESystemImages:       management.Management.RKEK8sSystemImages(""),
 	}
 
 	// Add handlers
@@ -75,6 +82,11 @@ func Register(ctx context.Context, management *config.ManagementContext) {
 	rkeDriver.DockerDialer = docker.Build
 	rkeDriver.LocalDialer = local.Build
 	rkeDriver.WrapTransportFactory = docker.WrapTransport
+	mgmt := management.Management
+	rkeDriver.DataStore = NewDataStore(mgmt.RKEAddons("").Controller().Lister(),
+		mgmt.RKEAddons(""),
+		mgmt.RKEK8sServiceOptions("").Controller().Lister(),
+		mgmt.RKEK8sServiceOptions(""))
 }
 
 func (p *Provisioner) Remove(cluster *v3.Cluster) (runtime.Object, error) {
@@ -629,7 +641,7 @@ func (p *Provisioner) getConfig(reconcileRKE bool, spec v3.ClusterSpec, driverNa
 			return nil, nil, err
 		}
 
-		systemImages, err := getSystemImages(spec)
+		systemImages, err := p.getSystemImages(spec)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -703,12 +715,12 @@ func (p *Provisioner) validateDriver(cluster *v3.Cluster) (string, error) {
 	return newDriver, nil
 }
 
-func getSystemImages(spec v3.ClusterSpec) (*v3.RKESystemImages, error) {
+func (p *Provisioner) getSystemImages(spec v3.ClusterSpec) (*v3.RKESystemImages, error) {
 	// fetch system images from settings
 	version := spec.RancherKubernetesEngineConfig.Version
-	systemImages, ok := v3.AllK8sVersions[version]
-	if !ok {
-		return nil, fmt.Errorf("failed to find system images for version %v", version)
+	systemImages, err := kd.GetRKESystemImages(version, p.RKESystemImagesLister, p.RKESystemImages)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find system images for version %s: %v", version, err)
 	}
 
 	privateRegistry := getPrivateRepo(spec.RancherKubernetesEngineConfig)
@@ -877,7 +889,7 @@ func (p *Provisioner) restoreClusterBackup(cluster *v3.Cluster, spec v3.ClusterS
 		return "", "", "", fmt.Errorf("snapshot [%s] is not a backup of cluster [%s]", backup.Name, cluster.Name)
 	}
 
-	api, token, cert, err = p.driverRestore(cluster, spec)
+	api, token, cert, err = p.driverRestore(cluster, spec, GetBackupFilename(backup))
 	if err != nil {
 		return "", "", "", err
 	}
@@ -893,4 +905,40 @@ func (p *Provisioner) restoreClusterBackup(cluster *v3.Cluster, spec v3.ClusterS
 		}
 	}
 	return api, token, cert, err
+}
+
+func GetBackupFilenameFromURL(URL string) (string, error) {
+	if !isValidURL(URL) {
+		return "", fmt.Errorf("URL is not valid: [%s]", URL)
+	}
+	parsedURL, err := url.Parse(URL)
+	if err != nil {
+		return "", err
+	}
+	if parsedURL.Path == "" {
+		return "", fmt.Errorf("No path found in URL: [%s]", URL)
+	}
+	extractedPath := path.Base(parsedURL.Path)
+	return extractedPath, nil
+}
+
+// isValidURL tests a string to determine if it is a url or not.
+// https://golangcode.com/how-to-check-if-a-string-is-a-url/
+func isValidURL(URL string) bool {
+	_, err := url.ParseRequestURI(URL)
+	if err != nil {
+		return false
+	}
+	return true
+}
+
+func GetBackupFilename(backup *v3.EtcdBackup) string {
+	snapshot := backup.Name
+	if filename, err := GetBackupFilenameFromURL(backup.Spec.Filename); err == nil { // s3 file
+		// need to remove extention
+		snapshot = strings.TrimSuffix(filename, path.Ext(filename))
+	} else if len(backup.Spec.Filename) != 0 { // not s3 url
+		snapshot = strings.TrimSuffix(backup.Spec.Filename, path.Ext(backup.Spec.Filename))
+	}
+	return snapshot
 }

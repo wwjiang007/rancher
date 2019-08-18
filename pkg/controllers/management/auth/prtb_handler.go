@@ -19,27 +19,33 @@ const (
 	ptrbMGMTController = "mgmt-auth-prtb-controller"
 )
 
-var projectManagmentPlaneResources = []string{
-	"apps",
-	"catalogtemplates",
-	"catalogtemplateversions",
-	"pipelines",
-	"pipelineexecutions",
-	"pipelinesettings",
-	"sourcecodeproviderconfigs",
-	"projectloggings",
-	"projectalertrules",
-	"projectalertgroups",
-	"projectcatalogs",
-	"projectmonitorgraphs",
-	"projectroletemplatebindings",
-	"secrets",
+var projectManagmentPlaneResources = map[string]string{
+	"apps":                        "project.cattle.io",
+	"apprevisions":                "project.cattle.io",
+	"catalogtemplates":            "management.cattle.io",
+	"catalogtemplateversions":     "management.cattle.io",
+	"pipelines":                   "project.cattle.io",
+	"pipelineexecutions":          "project.cattle.io",
+	"pipelinesettings":            "project.cattle.io",
+	"sourcecodeproviderconfigs":   "project.cattle.io",
+	"projectloggings":             "management.cattle.io",
+	"projectalertrules":           "management.cattle.io",
+	"projectalertgroups":          "management.cattle.io",
+	"projectcatalogs":             "management.cattle.io",
+	"projectmonitorgraphs":        "management.cattle.io",
+	"projectroletemplatebindings": "management.cattle.io",
+	"secrets":                     "",
 }
-var prtbClusterManagmentPlaneResources = []string{
-	"notifiers",
-	"clustercatalogs",
-	"catalogtemplates",
-	"catalogtemplateversions",
+var prtbClusterManagmentPlaneResources = map[string]string{
+	"notifiers":               "management.cattle.io",
+	"clustercatalogs":         "management.cattle.io",
+	"catalogtemplates":        "management.cattle.io",
+	"catalogtemplateversions": "management.cattle.io",
+}
+
+var projectScopedAdminRoles = map[string]bool{
+	"project-owner": true,
+	"admin":         true,
 }
 
 type prtbLifecycle struct {
@@ -158,7 +164,11 @@ func (p *prtbLifecycle) reconcileBindings(binding *v3.ProjectRoleTemplateBinding
 	}
 
 	roleName := strings.ToLower(fmt.Sprintf("%v-clustermember", clusterName))
-	isOwnerRole := binding.RoleTemplateName == "project-owner"
+	// if roletemplate is not builtin, check if it's inherited/cloned
+	isOwnerRole, err := p.mgr.checkReferencedRoles(binding.RoleTemplateName)
+	if err != nil {
+		return err
+	}
 	var projectRoleName string
 	if isOwnerRole {
 		projectRoleName = strings.ToLower(fmt.Sprintf("%v-projectowner", projectName))

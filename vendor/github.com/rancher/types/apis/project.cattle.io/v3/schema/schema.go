@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	monitoringv1 "github.com/coreos/prometheus-operator/pkg/client/monitoring/v1"
+	istiov1alpha3 "github.com/knative/pkg/apis/istio/v1alpha3"
 	"github.com/rancher/norman/types"
 	m "github.com/rancher/norman/types/mapper"
 	v3 "github.com/rancher/types/apis/project.cattle.io/v3"
@@ -46,7 +47,8 @@ var (
 		Init(appTypes).
 		Init(pipelineTypes).
 		Init(monitoringTypes).
-		Init(autoscalingTypes)
+		Init(autoscalingTypes).
+		Init(istioTypes)
 )
 
 func configMapTypes(schemas *types.Schemas) *types.Schemas {
@@ -486,9 +488,6 @@ func podTypes(schemas *types.Schemas) *types.Schemas {
 		AddMapperForType(&Version, v1.PodTemplateSpec{},
 			&m.Embed{Field: "spec"},
 		).
-		AddMapperForType(&Version, v1.HTTPGetAction{},
-			&m.Drop{Field: "host"},
-		).
 		AddMapperForType(&Version, v1.Capabilities{},
 			m.Move{From: "add", To: "capAdd"},
 			m.Move{From: "drop", To: "capDrop"},
@@ -528,6 +527,9 @@ func podTypes(schemas *types.Schemas) *types.Schemas {
 		AddMapperForType(&Version, v1.PodSpec{},
 			mapper.InitContainerMapper{},
 			mapper.SchedulingMapper{},
+			m.Move{From: "priority", To: "scheduling/priority", DestDefined: true},
+			m.Move{From: "priorityClassName", To: "scheduling/priorityClassName", DestDefined: true},
+			m.Move{From: "schedulerName", To: "scheduling/scheduler", DestDefined: true},
 			m.Move{From: "tolerations", To: "scheduling/tolerate", DestDefined: true},
 			&m.Embed{Field: "securityContext"},
 			&m.Drop{Field: "serviceAccount"},
@@ -698,6 +700,7 @@ func ingressTypes(schemas *types.Schemas) *types.Schemas {
 		}{}).
 		MustImportAndCustomize(&Version, v1beta1.Ingress{}, func(schema *types.Schema) {
 			schema.MustCustomizeField("name", func(f types.Field) types.Field {
+				f.Type = "hostname"
 				f.Required = true
 				f.Nullable = false
 				return f
@@ -1086,5 +1089,21 @@ func autoscalingTypes(schemas *types.Schemas) *types.Schemas {
 		MustImport(&Version, autoscaling.HorizontalPodAutoscaler{}, projectOverride{}, struct {
 			DisplayName string `json:"displayName,omitempty"`
 			Description string `json:"description,omitempty"`
+		}{})
+}
+
+func istioTypes(schemas *types.Schemas) *types.Schemas {
+	return schemas.
+		MustImport(&Version, istiov1alpha3.HTTPMatchRequest{}, struct {
+			Port *uint32 `json:"port,omitempty"`
+		}{}).
+		MustImport(&Version, istiov1alpha3.HTTPRoute{}, struct {
+			WebsocketUpgrade *bool `json:"websocketUpgrade,omitempty"`
+		}{}).
+		MustImport(&Version, istiov1alpha3.VirtualService{}, projectOverride{}, struct {
+			Status interface{}
+		}{}).
+		MustImport(&Version, istiov1alpha3.DestinationRule{}, projectOverride{}, struct {
+			Status interface{}
 		}{})
 }

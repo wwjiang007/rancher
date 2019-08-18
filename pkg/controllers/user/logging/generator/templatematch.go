@@ -163,11 +163,22 @@ var MatchTemplate = `
 	{{- if .FluentForwarderConfig.EnableTLS }}
 	transport tls    
 	tls_allow_self_signed_cert true
+	{{- if .FluentForwarderConfig.SSLVerify }}
 	tls_verify_hostname true
+	{{else }}
+	tls_verify_hostname false
+	{{end }}
 	{{end}}
 	{{- if .FluentForwarderConfig.Certificate }}
 	tls_cert_path {{.CertFilePrefix}}_ca.pem
-	{{end}}  
+	{{end}}
+	{{- if and .FluentForwarderConfig.ClientCert .FluentForwarderConfig.ClientKey}}
+	tls_client_cert_path {{.CertFilePrefix}}_client-cert.pem
+	tls_client_private_key_path {{.CertFilePrefix}}_client-key.pem
+	{{end}}
+	{{- if .FluentForwarderConfig.ClientKeyPass}}
+	tls_client_private_key_passphrase {{.FluentForwarderConfig.ClientKeyPass}}
+	{{end}}
 	{{- if .FluentForwarderConfig.Compress }}
 	compress gzip
 	{{end}}

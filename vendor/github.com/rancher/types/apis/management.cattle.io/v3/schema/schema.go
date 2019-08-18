@@ -44,14 +44,28 @@ var (
 		Init(monitorTypes).
 		Init(credTypes).
 		Init(mgmtSecretTypes).
-		Init(clusterTemplateTypes)
+		Init(clusterTemplateTypes).
+		Init(driverMetadataTypes)
 
 	TokenSchemas = factory.Schemas(&Version).
 			Init(tokens)
 )
 
 func rkeTypes(schemas *types.Schemas) *types.Schemas {
-	return schemas.AddMapperForType(&Version, v3.BaseService{}, m.Drop{Field: "image"})
+	return schemas.AddMapperForType(&Version, v3.BaseService{}, m.Drop{Field: "image"}).
+		AddMapperForType(&Version, v1.Taint{},
+			m.Enum{Field: "effect", Options: []string{
+				string(v1.TaintEffectNoSchedule),
+				string(v1.TaintEffectPreferNoSchedule),
+				string(v1.TaintEffectNoExecute),
+			}},
+			m.Required{Fields: []string{
+				"effect",
+				"value",
+				"key",
+			}},
+			m.ReadOnly{Field: "timeAdded"},
+		)
 }
 
 func schemaTypes(schemas *types.Schemas) *types.Schemas {
@@ -74,6 +88,18 @@ func mgmtSecretTypes(schemas *types.Schemas) *types.Schemas {
 		schema.CodeName = "ManagementSecret"
 		schema.CodeNamePlural = "ManagementSecrets"
 	})
+}
+
+func driverMetadataTypes(schemas *types.Schemas) *types.Schemas {
+	return schemas.
+		AddMapperForType(&Version, v3.RKEK8sSystemImage{}, m.Drop{Field: "namespaceId"}).
+		AddMapperForType(&Version, v3.RKEK8sServiceOption{}, m.Drop{Field: "namespaceId"}).
+		AddMapperForType(&Version, v3.RKEAddon{}, m.Drop{Field: "namespaceId"}).
+		AddMapperForType(&Version, v3.RKEK8sWindowsSystemImage{}, m.Drop{Field: "namespaceId"}).
+		MustImport(&Version, v3.RKEK8sSystemImage{}).
+		MustImport(&Version, v3.RKEK8sServiceOption{}).
+		MustImport(&Version, v3.RKEAddon{}).
+		MustImport(&Version, v3.RKEK8sWindowsSystemImage{})
 }
 
 func catalogTypes(schemas *types.Schemas) *types.Schemas {
@@ -303,8 +329,10 @@ func nodeTypes(schemas *types.Schemas) *types.Schemas {
 			&m.Drop{Field: "annotations"},
 			&m.Move{From: "nodeLabels", To: "labels"},
 			&m.Move{From: "nodeAnnotations", To: "annotations"},
+			&m.Drop{Field: "desiredNodeTaints"},
 			&m.Drop{Field: "desiredNodeLabels"},
 			&m.Drop{Field: "desiredNodeAnnotations"},
+			&m.Drop{Field: "updateTaintsFromAPI"},
 			&m.Drop{Field: "currentNodeLabels"},
 			&m.Drop{Field: "currentNodeAnnotations"},
 			&m.Drop{Field: "desiredNodeUnschedulable"},
@@ -773,6 +801,9 @@ func kontainerTypes(schemas *types.Schemas) *types.Schemas {
 			schema.ResourceActions = map[string]types.Action{
 				"activate":   {},
 				"deactivate": {},
+			}
+			schema.CollectionActions = map[string]types.Action{
+				"refresh": {},
 			}
 		})
 }

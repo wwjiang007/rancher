@@ -1,29 +1,33 @@
 package clustertemplate
 
 import (
-	"strings"
-
 	"fmt"
+	"strings"
 
 	"github.com/rancher/norman/api/access"
 	"github.com/rancher/norman/httperror"
 	"github.com/rancher/norman/types"
 	"github.com/rancher/norman/types/convert"
-	gaccess "github.com/rancher/rancher/pkg/api/customization/globalnamespaceaccess"
+	"github.com/rancher/norman/types/values"
+	"github.com/rancher/rancher/pkg/api/customization/clustertemplate"
+	"github.com/rancher/rancher/pkg/ref"
 	v3 "github.com/rancher/types/apis/management.cattle.io/v3"
+	mgmtSchema "github.com/rancher/types/apis/management.cattle.io/v3/schema"
 	managementv3 "github.com/rancher/types/client/management/v3"
+	"github.com/rancher/types/config"
 )
 
 const (
 	clusterTemplateLabelName = "io.cattle.field/clusterTemplateId"
 )
 
-func WrapStore(store types.Store, users v3.UserInterface, grbLister v3.GlobalRoleBindingLister, grLister v3.GlobalRoleLister) types.Store {
+func WrapStore(store types.Store, mgmt *config.ScaledContext) types.Store {
 	storeWrapped := &Store{
 		Store:     store,
-		users:     users,
-		grbLister: grbLister,
-		grLister:  grLister,
+		users:     mgmt.Management.Users(""),
+		grbLister: mgmt.Management.GlobalRoleBindings("").Controller().Lister(),
+		grLister:  mgmt.Management.GlobalRoles("").Controller().Lister(),
+		ctLister:  mgmt.Management.ClusterTemplates("").Controller().Lister(),
 	}
 	return storeWrapped
 }
@@ -33,17 +37,23 @@ type Store struct {
 	users     v3.UserInterface
 	grbLister v3.GlobalRoleBindingLister
 	grLister  v3.GlobalRoleLister
+	ctLister  v3.ClusterTemplateLister
 }
 
 func (p *Store) Create(apiContext *types.APIContext, schema *types.Schema, data map[string]interface{}) (map[string]interface{}, error) {
 
-	if strings.EqualFold(apiContext.Type, managementv3.ClusterTemplateType) {
-		if err := p.canSetEnforce(apiContext, data, ""); err != nil {
+	if strings.EqualFold(apiContext.Type, managementv3.ClusterTemplateRevisionType) {
+		if data[managementv3.ClusterTemplateRevisionFieldClusterConfig] == nil {
+			return nil, httperror.NewAPIError(httperror.MissingRequired, "ClusterTemplateRevision field ClusterConfig is required")
+		}
+		err := p.checkPermissionToCreateRevision(apiContext, data)
+		if err != nil {
 			return nil, err
 		}
-	}
-
-	if strings.EqualFold(apiContext.Type, managementv3.ClusterTemplateRevisionType) {
+		err = p.checkKubernetesVersionFormat(apiContext, data)
+		if err != nil {
+			return nil, err
+		}
 		if err := setLabelsAndOwnerRef(apiContext, data); err != nil {
 			return nil, err
 		}
@@ -54,13 +64,12 @@ func (p *Store) Create(apiContext *types.APIContext, schema *types.Schema, data 
 
 func (p *Store) Update(apiContext *types.APIContext, schema *types.Schema, data map[string]interface{}, id string) (map[string]interface{}, error) {
 
-	if strings.EqualFold(apiContext.Type, managementv3.ClusterTemplateType) {
-		if err := p.canSetEnforce(apiContext, data, id); err != nil {
+	if strings.EqualFold(apiContext.Type, managementv3.ClusterTemplateRevisionType) {
+		err := p.checkKubernetesVersionFormat(apiContext, data)
+		if err != nil {
 			return nil, err
 		}
-	}
 
-	if strings.EqualFold(apiContext.Type, managementv3.ClusterTemplateRevisionType) {
 		isUsed, err := isTemplateInUse(apiContext, id)
 		if err != nil {
 			return nil, err
@@ -178,37 +187,55 @@ func isDefaultTemplateRevision(apiContext *types.APIContext, id string) (bool, e
 	return false, nil
 }
 
-func (p *Store) canSetEnforce(apiContext *types.APIContext, data map[string]interface{}, templateID string) error {
-	//check if turning on enforced flag
-
-	enforcedFlagInData := convert.ToBool(data[managementv3.ClusterTemplateFieldEnforced])
-	enforcedFlagChanged := enforcedFlagInData
-
-	if templateID != "" {
-		var template managementv3.ClusterTemplate
-		if err := access.ByID(apiContext, apiContext.Version, managementv3.ClusterTemplateType, templateID, &template); err != nil {
-			return err
-		}
-		if template.Enforced != enforcedFlagInData {
-			enforcedFlagChanged = true
-		}
-	}
-	if enforcedFlagChanged {
-		//only admin can set the flag
-		ma := gaccess.MemberAccess{
-			Users:     p.users,
-			GrLister:  p.grLister,
-			GrbLister: p.grbLister,
-		}
-		callerID := apiContext.Request.Header.Get(gaccess.ImpersonateUserHeader)
-		isAdmin, err := ma.IsAdmin(callerID)
-		if err != nil {
-			return err
-		}
-		if !isAdmin {
-			return httperror.NewAPIError(httperror.PermissionDenied, fmt.Sprintf("ClusterTemplate's %v field cannot be changed", managementv3.ClusterTemplateFieldEnforced))
-		}
+func (p *Store) checkPermissionToCreateRevision(apiContext *types.APIContext, data map[string]interface{}) error {
+	value, found := values.GetValue(data, managementv3.ClusterTemplateRevisionFieldClusterTemplateID)
+	if !found {
+		return httperror.NewAPIError(httperror.NotFound, "invalid request: clusterTemplateID not found")
 	}
 
+	clusterTemplateID := convert.ToString(value)
+	_, clusterTemplateName := ref.Parse(clusterTemplateID)
+	var ctMap map[string]interface{}
+	if err := access.ByID(apiContext, &mgmtSchema.Version, managementv3.ClusterTemplateType, clusterTemplateID, &ctMap); err != nil {
+		return httperror.NewAPIError(httperror.NotFound, fmt.Sprintf("unable to access clusterTemplate by id: %v", err))
+	}
+	if err := apiContext.AccessControl.CanDo(v3.ClusterTemplateGroupVersionKind.Group, v3.ClusterTemplateResource.Name, "update", apiContext, ctMap, apiContext.Schema); err != nil {
+		return httperror.NewAPIError(httperror.PermissionDenied, fmt.Sprintf("user does not have permission to update clusterTemplate %s by creating a revision for it", clusterTemplateName))
+	}
+	return nil
+}
+
+func (p *Store) checkKubernetesVersionFormat(apiContext *types.APIContext, data map[string]interface{}) error {
+	clusterConfig, found := values.GetValue(data, managementv3.ClusterTemplateRevisionFieldClusterConfig)
+	if !found || clusterConfig == nil {
+		return httperror.NewAPIError(httperror.MissingRequired, "ClusterTemplateRevision field ClusterConfig is required")
+	}
+	k8sVersionReq := values.GetValueN(data, managementv3.ClusterTemplateRevisionFieldClusterConfig, "rancherKubernetesEngineConfig", "kubernetesVersion")
+	if k8sVersionReq == nil {
+		return nil
+	}
+	k8sVersion := convert.ToString(k8sVersionReq)
+	genericPatch, err := clustertemplate.CheckKubernetesVersionFormat(k8sVersion)
+	if err != nil {
+		return err
+	}
+	if genericPatch {
+		//ensure a question is added for "rancherKubernetesEngineConfig.kubernetesVersion"
+		templateQuestions, ok := data[managementv3.ClusterTemplateRevisionFieldQuestions]
+		if !ok {
+			return httperror.NewAPIError(httperror.MissingRequired, fmt.Sprintf("ClusterTemplateRevision must have a Question set for %v", clustertemplate.RKEConfigK8sVersion))
+		}
+		templateQuestionsSlice := convert.ToMapSlice(templateQuestions)
+		var foundQ bool
+		for _, question := range templateQuestionsSlice {
+			if question["variable"] == clustertemplate.RKEConfigK8sVersion {
+				foundQ = true
+				break
+			}
+		}
+		if !foundQ {
+			return httperror.NewAPIError(httperror.MissingRequired, fmt.Sprintf("ClusterTemplateRevision must have a Question set for %v", clustertemplate.RKEConfigK8sVersion))
+		}
+	}
 	return nil
 }

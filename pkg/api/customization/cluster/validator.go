@@ -1,10 +1,10 @@
 package cluster
 
 import (
+	"fmt"
 	"strings"
 
-	"fmt"
-
+	"github.com/rancher/norman/api/access"
 	"github.com/rancher/norman/httperror"
 	"github.com/rancher/norman/types"
 	"github.com/rancher/norman/types/convert"
@@ -12,6 +12,7 @@ import (
 	"github.com/rancher/rancher/pkg/namespace"
 	"github.com/rancher/rancher/pkg/settings"
 	v3 "github.com/rancher/types/apis/management.cattle.io/v3"
+	mgmtSchema "github.com/rancher/types/apis/management.cattle.io/v3/schema"
 	mgmtclient "github.com/rancher/types/client/management/v3"
 )
 
@@ -102,19 +103,18 @@ func (v *Validator) validateEnforcement(request *types.APIContext, data map[stri
 	}
 
 	//enforcement is true, template is a must
-	if spec.ClusterTemplateID == "" || spec.ClusterTemplateRevisionID == "" {
-		return httperror.NewFieldAPIError(httperror.MissingRequired, "", "A clusterTemplate is required to create a cluster")
+	if spec.ClusterTemplateRevisionID == "" {
+		return httperror.NewFieldAPIError(httperror.MissingRequired, "", "A clusterTemplateRevision to create a cluster")
 	}
 
-	enforced, err := v.isTemplateEnforced(&spec)
+	canAccess, err := v.isTemplateAccessible(request, &spec)
 	if err != nil {
 		return err
 	}
 
-	if !enforced {
-		return httperror.NewFieldAPIError(httperror.PermissionDenied, "", fmt.Sprintf("%v is not a valid clusterTemplate to create a cluster", spec.ClusterTemplateID))
+	if !canAccess {
+		return httperror.NewFieldAPIError(httperror.PermissionDenied, "", "No permission to access clusterTemplateRevision")
 	}
-
 	return nil
 }
 
@@ -123,39 +123,27 @@ func (v *Validator) checkClusterForEnforcement(spec *mgmtclient.Cluster) bool {
 		return true
 	}
 
-	if spec.ClusterTemplateID != "" || spec.ClusterTemplateRevisionID != "" {
+	if spec.ClusterTemplateRevisionID != "" {
 		return true
 	}
 	return false
 }
 
-func (v *Validator) isTemplateEnforced(spec *mgmtclient.Cluster) (bool, error) {
-	//template must be marked as enforced=true  + must be public
-
-	split := strings.SplitN(spec.ClusterTemplateID, ":", 2)
+func (v *Validator) isTemplateAccessible(request *types.APIContext, spec *mgmtclient.Cluster) (bool, error) {
+	split := strings.SplitN(spec.ClusterTemplateRevisionID, ":", 2)
 	if len(split) != 2 {
-		return false, fmt.Errorf("error in splitting clusterTemplate name %v", spec.ClusterTemplateID)
+		return false, fmt.Errorf("error in splitting clusterTemplateRevision name %v", spec.ClusterTemplateRevisionID)
 	}
-	templateName := split[1]
-
-	clusterTemp, err := v.ClusterTemplateLister.Get(namespace.GlobalNamespace, templateName)
+	revName := split[1]
+	clusterTempRev, err := v.ClusterTemplateRevisionLister.Get(namespace.GlobalNamespace, revName)
 	if err != nil {
 		return false, err
 	}
-	if !clusterTemp.Spec.Enforced {
-		return false, nil
+
+	var ctMap map[string]interface{}
+	if err := access.ByID(request, &mgmtSchema.Version, mgmtclient.ClusterTemplateType, clusterTempRev.Spec.ClusterTemplateName, &ctMap); err != nil {
+		return false, httperror.WrapAPIError(err, httperror.PermissionDenied, fmt.Sprintf("unable to access clusterTemplate by id: %v", err))
 	}
 
-	//make sure it is public
-	var isPublic bool
-	for _, member := range clusterTemp.Spec.Members {
-		if strings.EqualFold(member.GroupPrincipalName, "*") {
-			isPublic = true
-			break
-		}
-	}
-	if !isPublic {
-		return false, nil
-	}
 	return true, nil
 }

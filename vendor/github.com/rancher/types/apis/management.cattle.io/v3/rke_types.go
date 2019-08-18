@@ -1,5 +1,11 @@
 package v3
 
+import (
+	"github.com/rancher/norman/types"
+	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
 type RancherKubernetesEngineConfig struct {
 	// Kubernetes nodes
 	Nodes []RKEConfigNode `yaml:"nodes" json:"nodes,omitempty"`
@@ -167,6 +173,50 @@ type RKEConfigNode struct {
 	SSHCertPath string `yaml:"ssh_cert_path" json:"sshCertPath,omitempty"`
 	// Node Labels
 	Labels map[string]string `yaml:"labels" json:"labels,omitempty"`
+	// Node Taints
+	Taints []RKETaint `yaml:"taints" json:"taints,omitempty"`
+}
+
+type RKEK8sSystemImage struct {
+	types.Namespaced
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	SystemImages RKESystemImages `yaml:"system_images" json:"systemImages,omitempty"`
+}
+
+type RKEK8sServiceOption struct {
+	types.Namespaced
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	ServiceOptions KubernetesServicesOptions `yaml:"service_options" json:"serviceOptions,omitempty"`
+}
+
+type RKEAddon struct {
+	types.Namespaced
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	Template string `yaml:"template" json:"template,omitempty"`
+}
+
+type RKEK8sWindowsSystemImage struct {
+	types.Namespaced
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	SystemImages WindowsSystemImages `yaml:"windows_system_images" json:"windowsSystemImages,omitempty"`
+}
+
+type K8sVersionInfo struct {
+	MinRKEVersion       string `yaml:"min_rke_version" json:"minRKEVersion,omitempty"`
+	MaxRKEVersion       string `yaml:"max_rke_version" json:"maxRKEVersion,omitempty"`
+	DeprecateRKEVersion string `yaml:"deprecate_rke_version" json:"deprecateRKEVersion,omitempty"`
+
+	MinRancherVersion       string `yaml:"min_rancher_version" json:"minRancherVersion,omitempty"`
+	MaxRancherVersion       string `yaml:"max_rancher_version" json:"maxRancherVersion,omitempty"`
+	DeprecateRancherVersion string `yaml:"deprecate_rancher_version" json:"deprecateRancherVersion,omitempty"`
 }
 
 type RKEConfigServices struct {
@@ -197,6 +247,11 @@ type ETCDService struct {
 	Key string `yaml:"key" json:"key,omitempty"`
 	// External etcd prefix
 	Path string `yaml:"path" json:"path,omitempty"`
+	// UID to run etcd container as
+	UID int `yaml:"uid" json:"uid,omitempty"`
+	// GID to run etcd container as
+	GID int `yaml:"gid" json:"gid,omitempty"`
+
 	// Etcd Recurring snapshot Service, used by rke only
 	Snapshot *bool `yaml:"snapshot" json:"snapshot,omitempty" norman:"default=false"`
 	// Etcd snapshot Retention period
@@ -330,6 +385,8 @@ type RKEConfigNodePlan struct {
 	Annotations map[string]string `json:"annotations,omitempty"`
 	// Node Labels
 	Labels map[string]string `json:"labels,omitempty"`
+	// Node Taints
+	Taints []RKETaint `json:"taints,omitempty"`
 }
 
 type Process struct {
@@ -363,6 +420,8 @@ type Process struct {
 	Labels map[string]string `json:"labels,omitempty"`
 	// Process docker publish container's port to host
 	Publish []string `json:"publish,omitempty"`
+	// docker will run the container with this user
+	User string `json:"user,omitempty"`
 }
 
 type HealthCheck struct {
@@ -700,4 +759,11 @@ type DNSConfig struct {
 	StubDomains map[string][]string `yaml:"stubdomains" json:"stubdomains,omitempty"`
 	// NodeSelector key pair
 	NodeSelector map[string]string `yaml:"node_selector" json:"nodeSelector,omitempty"`
+}
+
+type RKETaint struct {
+	Key       string         `json:"key,omitempty" yaml:"key"`
+	Value     string         `json:"value,omitempty" yaml:"value"`
+	Effect    v1.TaintEffect `json:"effect,omitempty" yaml:"effect"`
+	TimeAdded *metav1.Time   `json:"timeAdded,omitempty" yaml:"timeAdded,omitempty"`
 }

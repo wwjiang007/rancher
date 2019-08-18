@@ -2,7 +2,33 @@ package systemtemplate
 
 var templateSource = `
 ---
-
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: proxy-clusterrole-kubeapiserver
+rules:
+- apiGroups: [""]
+  resources:
+  - nodes/metrics
+  - nodes/proxy
+  - nodes/stats
+  - nodes/log
+  - nodes/spec
+  verbs: ["get", "list", "watch", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: proxy-role-binding-kubernetes-master
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: proxy-clusterrole-kubeapiserver
+subjects:
+- apiGroup: rbac.authorization.k8s.io
+  kind: User
+  name: kube-apiserver
+---
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -91,7 +117,24 @@ spec:
                   operator: NotIn
                   values:
                     - windows
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            preference:
+              matchExpressions:
+              - key: node-role.kubernetes.io/controlplane
+                operator: In
+                values:
+                - "true"
+          - weight: 1
+            preference:
+              matchExpressions:
+              - key: node-role.kubernetes.io/etcd
+                operator: In
+                values:
+                - "true"
       serviceAccountName: cattle
+      tolerations:
+      - operator: Exists
       containers:
         - name: cluster-register
           imagePullPolicy: IfNotPresent
@@ -113,6 +156,7 @@ spec:
       - name: cattle-credentials
         secret:
           secretName: cattle-credentials-{{.TokenKey}}
+          defaultMode: 320
 
 ---
 
@@ -142,12 +186,7 @@ spec:
       hostNetwork: true
       serviceAccountName: cattle
       tolerations:
-      - effect: NoExecute
-        key: "node-role.kubernetes.io/etcd"
-        value: "true"
-      - effect: NoSchedule
-        key: "node-role.kubernetes.io/controlplane"
-        value: "true"
+      - operator: Exists
       containers:
       - name: agent
         image: {{.AgentImage}}
@@ -197,6 +236,7 @@ spec:
       - name: cattle-credentials
         secret:
           secretName: cattle-credentials-{{.TokenKey}}
+          defaultMode: 320
       - hostPath:
           path: /etc/docker/certs.d
           type: DirectoryOrCreate
@@ -231,15 +271,14 @@ spec:
                   operator: NotIn
                   values:
                     - windows
+                - key: node-role.kubernetes.io/controlplane
+                  operator: In
+                  values:
+                    - "true"
       hostNetwork: true
       serviceAccountName: cattle
       tolerations:
-      - effect: NoExecute
-        key: "node-role.kubernetes.io/etcd"
-        value: "true"
-      - effect: NoSchedule
-        key: "node-role.kubernetes.io/controlplane"
-        value: "true"
+      - operator: Exists
       containers:
       - name: kube-api-auth
         image: {{.AuthImage}}

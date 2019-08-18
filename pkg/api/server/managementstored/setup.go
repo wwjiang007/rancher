@@ -45,6 +45,7 @@ import (
 	"github.com/rancher/rancher/pkg/api/store/noopwatching"
 	passwordStore "github.com/rancher/rancher/pkg/api/store/password"
 	"github.com/rancher/rancher/pkg/api/store/preference"
+	rtStore "github.com/rancher/rancher/pkg/api/store/roletemplate"
 	"github.com/rancher/rancher/pkg/api/store/scoped"
 	settingstore "github.com/rancher/rancher/pkg/api/store/setting"
 	"github.com/rancher/rancher/pkg/api/store/userscope"
@@ -53,7 +54,7 @@ import (
 	"github.com/rancher/rancher/pkg/auth/providers"
 	"github.com/rancher/rancher/pkg/clustermanager"
 	"github.com/rancher/rancher/pkg/controllers/management/compose/common"
-	"github.com/rancher/rancher/pkg/features"
+	md "github.com/rancher/rancher/pkg/controllers/management/kontainerdrivermetadata"
 	"github.com/rancher/rancher/pkg/namespace"
 	"github.com/rancher/rancher/pkg/nodeconfig"
 	sourcecodeproviders "github.com/rancher/rancher/pkg/pipeline/providers"
@@ -116,6 +117,10 @@ func Setup(ctx context.Context, apiContext *config.ScaledContext, clusterManager
 		client.ProjectNetworkPolicyType,
 		client.ProjectRoleTemplateBindingType,
 		client.ProjectType,
+		client.RKEK8sSystemImageType,
+		client.RKEK8sServiceOptionType,
+		client.RKEAddonType,
+		client.RKEK8sWindowsSystemImageType,
 		client.RoleTemplateType,
 		client.SettingType,
 		client.TemplateType,
@@ -173,6 +178,7 @@ func Setup(ctx context.Context, apiContext *config.ScaledContext, clusterManager
 	KontainerDriver(schemas, apiContext)
 	ClusterTemplates(schemas, apiContext)
 	ClusterScans(schemas, apiContext, clusterManager)
+	SystemImages(schemas, apiContext)
 
 	if err := NodeTypes(schemas, apiContext); err != nil {
 		return err
@@ -188,6 +194,7 @@ func Setup(ctx context.Context, apiContext *config.ScaledContext, clusterManager
 	setupScopedTypes(schemas)
 	setupPasswordTypes(ctx, schemas, apiContext)
 	multiclusterapp.SetMemberStore(ctx, schemas.Schema(&managementschema.Version, client.MultiClusterAppType), apiContext)
+	GlobalDNSProvidersPwdWrap(schemas, apiContext, localClusterEnabled)
 
 	return nil
 }
@@ -266,12 +273,13 @@ func Templates(ctx context.Context, schemas *types.Schemas, managementContext *c
 		"v3",
 		"CatalogTemplate",
 		"catalogtemplates")
-	schema.Formatter = catalog.TemplateFormatter
 	wrapper := catalog.TemplateWrapper{
-		CatalogLister:        managementContext.Management.Catalogs("").Controller().Lister(),
-		ClusterCatalogLister: managementContext.Management.ClusterCatalogs("").Controller().Lister(),
-		ProjectCatalogLister: managementContext.Management.ProjectCatalogs("").Controller().Lister(),
+		CatalogLister:                managementContext.Management.Catalogs("").Controller().Lister(),
+		ClusterCatalogLister:         managementContext.Management.ClusterCatalogs("").Controller().Lister(),
+		ProjectCatalogLister:         managementContext.Management.ProjectCatalogs("").Controller().Lister(),
+		CatalogTemplateVersionLister: managementContext.Management.CatalogTemplateVersions("").Controller().Lister(),
 	}
+	schema.Formatter = wrapper.TemplateFormatter
 	schema.LinkHandler = wrapper.TemplateIconHandler
 
 	schemaCatalogTemplate := schemas.Schema(&managementschema.Version, client.CatalogTemplateType)
@@ -318,6 +326,7 @@ func Catalog(schemas *types.Schemas, managementContext *config.ScaledContext) {
 	schema.ActionHandler = handler.RefreshActionHandler
 	schema.CollectionFormatter = catalog.CollectionFormatter
 	schema.LinkHandler = handler.ExportYamlHandler
+	schema.Validator = catalog.Validator
 }
 
 func ProjectCatalog(schemas *types.Schemas, managementContext *config.ScaledContext) {
@@ -328,6 +337,7 @@ func ProjectCatalog(schemas *types.Schemas, managementContext *config.ScaledCont
 	}
 	schema.ActionHandler = handler.RefreshProjectCatalogActionHandler
 	schema.CollectionFormatter = catalog.CollectionFormatter
+	schema.Validator = catalog.Validator
 }
 
 func ClusterCatalog(schemas *types.Schemas, managementContext *config.ScaledContext) {
@@ -338,6 +348,7 @@ func ClusterCatalog(schemas *types.Schemas, managementContext *config.ScaledCont
 	}
 	schema.ActionHandler = handler.RefreshClusterCatalogActionHandler
 	schema.CollectionFormatter = catalog.CollectionFormatter
+	schema.Validator = catalog.Validator
 }
 
 func ClusterRegistrationTokens(schemas *types.Schemas) {
@@ -449,13 +460,15 @@ func NodeTypes(schemas *types.Schemas, management *config.ScaledContext) error {
 func App(schemas *types.Schemas, management *config.ScaledContext, kubeConfigGetter common.KubeConfigGetter) {
 	schema := schemas.Schema(&projectschema.Version, projectclient.AppType)
 	store := &appStore.Store{
-		Store: schema.Store,
-		Apps:  management.Project.Apps("").Controller().Lister(),
+		Store:                 schema.Store,
+		Apps:                  management.Project.Apps("").Controller().Lister(),
+		TemplateVersionLister: management.Management.CatalogTemplateVersions("").Controller().Lister(),
 	}
 	schema.Store = store
 	wrapper := app.Wrapper{
 		Clusters:              management.Management.Clusters(""),
 		TemplateVersionClient: management.Management.CatalogTemplateVersions(""),
+		TemplateVersionLister: management.Management.CatalogTemplateVersions("").Controller().Lister(),
 		KubeConfigGetter:      kubeConfigGetter,
 		AppGetter:             management.Project,
 		UserLister:            management.Management.Users("").Controller().Lister(),
@@ -631,19 +644,32 @@ func RoleTemplate(schemas *types.Schemas, management *config.ScaledContext) {
 		RoleTemplateLister: management.Management.RoleTemplates("").Controller().Lister(),
 	}
 	schema := schemas.Schema(&managementschema.Version, client.RoleTemplateType)
+	schema.Formatter = rt.Formatter
 	schema.Validator = rt.Validator
+	schema.Store = rtStore.Wrap(schema.Store, management.Management.RoleTemplates("").Controller().Lister())
 }
 
 func KontainerDriver(schemas *types.Schemas, management *config.ScaledContext) {
 	schema := schemas.Schema(&managementschema.Version, client.KontainerDriverType)
+	metadataHandler := md.MetadataController{
+		SystemImagesLister:        management.Management.RKEK8sSystemImages("").Controller().Lister(),
+		SystemImages:              management.Management.RKEK8sSystemImages(""),
+		ServiceOptionsLister:      management.Management.RKEK8sServiceOptions("").Controller().Lister(),
+		ServiceOptions:            management.Management.RKEK8sServiceOptions(""),
+		AddonsLister:              management.Management.RKEAddons("").Controller().Lister(),
+		Addons:                    management.Management.RKEAddons(""),
+		WindowsSystemImagesLister: management.Management.RKEK8sWindowsSystemImages("").Controller().Lister(),
+		WindowsSystemImages:       management.Management.RKEK8sWindowsSystemImages(""),
+	}
 	handler := kontainerdriver.ActionHandler{
 		KontainerDrivers:      management.Management.KontainerDrivers(""),
 		KontainerDriverLister: management.Management.KontainerDrivers("").Controller().Lister(),
+		MetadataHandler:       metadataHandler,
 	}
 	schema.ActionHandler = handler.ActionHandler
+	schema.CollectionFormatter = kontainerdriver.CollectionFormatter
 	schema.Formatter = kontainerdriver.NewFormatter(management)
 	schema.Store = kontainerdriver.NewStore(management, schema.Store)
-	schema.Enabled = features.ClusterRandomizer.Enabled
 	kontainerDriverValidator := kontainerdriver.Validator{
 		KontainerDriverLister: management.Management.KontainerDrivers("").Controller().Lister(),
 	}
@@ -676,6 +702,7 @@ func MultiClusterApps(schemas *types.Schemas, management *config.ScaledContext) 
 		ProjectLister:                 management.Management.Projects("").Controller().Lister(),
 		ClusterLister:                 management.Management.Clusters("").Controller().Lister(),
 		Apps:                          management.Project.Apps(""),
+		TemplateVersionLister:         management.Management.CatalogTemplateVersions("").Controller().Lister(),
 	}
 	schema.Formatter = wrapper.Formatter
 	schema.ActionHandler = wrapper.ActionHandler
@@ -721,6 +748,11 @@ func GlobalDNSProviders(schemas *types.Schemas, management *config.ScaledContext
 	}
 }
 
+func GlobalDNSProvidersPwdWrap(schemas *types.Schemas, management *config.ScaledContext, localClusterEnabled bool) {
+	schema := schemas.Schema(&managementschema.Version, client.GlobalDNSProviderType)
+	schema.Store = globaldnsAPIStore.ProviderPwdWrap(schema.Store)
+}
+
 func ClusterTemplates(schemas *types.Schemas, management *config.ScaledContext) {
 	wrapper := clustertemplate.Wrapper{
 		ClusterTemplates:              management.Management.ClusterTemplates(""),
@@ -735,11 +767,7 @@ func ClusterTemplates(schemas *types.Schemas, management *config.ScaledContext) 
 		Store:              schema.Store,
 		NamespaceInterface: management.Core.Namespaces(""),
 	}
-	users := management.Management.Users("")
-	grbLister := management.Management.GlobalRoleBindings("").Controller().Lister()
-	grLister := management.Management.GlobalRoles("").Controller().Lister()
-
-	schema.Store = clustertemplatestore.WrapStore(schema.Store, users, grbLister, grLister)
+	schema.Store = clustertemplatestore.WrapStore(schema.Store, management)
 
 	schema.Formatter = wrapper.Formatter
 	schema.LinkHandler = wrapper.LinkHandler
@@ -749,7 +777,7 @@ func ClusterTemplates(schemas *types.Schemas, management *config.ScaledContext) 
 		Store:              revisionSchema.Store,
 		NamespaceInterface: management.Core.Namespaces(""),
 	}
-	revisionSchema.Store = clustertemplatestore.WrapStore(revisionSchema.Store, users, grbLister, grLister)
+	revisionSchema.Store = clustertemplatestore.WrapStore(revisionSchema.Store, management)
 	revisionSchema.CollectionFormatter = wrapper.CollectionFormatter
 	revisionSchema.ActionHandler = wrapper.ClusterTemplateRevisionsActionHandler
 }
@@ -763,4 +791,12 @@ func ClusterScans(schemas *types.Schemas, management *config.ScaledContext, clus
 	schema.LinkHandler = clusterScanHandler.LinkHandler
 
 	return nil
+}
+
+func SystemImages(schemas *types.Schemas, management *config.ScaledContext) {
+	schema := schemas.Schema(&managementschema.Version, client.RKEK8sSystemImageType)
+	schema.Store = &globalresource.GlobalNamespaceStore{
+		Store:              schema.Store,
+		NamespaceInterface: management.Core.Namespaces(""),
+	}
 }

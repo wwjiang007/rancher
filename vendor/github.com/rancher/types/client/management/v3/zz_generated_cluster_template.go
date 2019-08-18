@@ -11,8 +11,6 @@ const (
 	ClusterTemplateFieldCreatorID         = "creatorId"
 	ClusterTemplateFieldDefaultRevisionID = "defaultRevisionId"
 	ClusterTemplateFieldDescription       = "description"
-	ClusterTemplateFieldEnabled           = "enabled"
-	ClusterTemplateFieldEnforced          = "enforced"
 	ClusterTemplateFieldLabels            = "labels"
 	ClusterTemplateFieldMembers           = "members"
 	ClusterTemplateFieldName              = "name"
@@ -28,8 +26,6 @@ type ClusterTemplate struct {
 	CreatorID         string            `json:"creatorId,omitempty" yaml:"creatorId,omitempty"`
 	DefaultRevisionID string            `json:"defaultRevisionId,omitempty" yaml:"defaultRevisionId,omitempty"`
 	Description       string            `json:"description,omitempty" yaml:"description,omitempty"`
-	Enabled           *bool             `json:"enabled,omitempty" yaml:"enabled,omitempty"`
-	Enforced          bool              `json:"enforced,omitempty" yaml:"enforced,omitempty"`
 	Labels            map[string]string `json:"labels,omitempty" yaml:"labels,omitempty"`
 	Members           []Member          `json:"members,omitempty" yaml:"members,omitempty"`
 	Name              string            `json:"name,omitempty" yaml:"name,omitempty"`

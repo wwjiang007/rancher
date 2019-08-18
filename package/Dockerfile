@@ -17,14 +17,18 @@ ARG SYSTEM_CHART_DEFAULT_BRANCH=v2.3-preview2
 
 ENV CATTLE_SYSTEM_CHART_DEFAULT_BRANCH=$SYSTEM_CHART_DEFAULT_BRANCH
 ENV CATTLE_HELM_VERSION v2.10.0-rancher11
-ENV CATTLE_MACHINE_VERSION v0.15.0-rancher8-1
+ENV CATTLE_MACHINE_VERSION v0.15.0-rancher11-1
 ENV LOGLEVEL_VERSION v0.1.2
 ENV TINI_VERSION v0.18.0
 ENV TELEMETRY_VERSION v0.5.6
-
+ENV DOCKER_MACHINE_LINODE_VERSION v0.1.8
+ENV LINODE_UI_DRIVER_VERSION v0.3.0
 
 RUN curl -sLf https://github.com/rancher/machine-package/releases/download/${CATTLE_MACHINE_VERSION}/docker-machine-${ARCH}.tar.gz | tar xvzf - -C /usr/bin && \
-    curl -sLf https://github.com/rancher/loglevel/releases/download/${LOGLEVEL_VERSION}/loglevel-${ARCH}-${LOGLEVEL_VERSION}.tar.gz | tar xvzf - -C /usr/bin
+    curl -sLf https://github.com/rancher/loglevel/releases/download/${LOGLEVEL_VERSION}/loglevel-${ARCH}-${LOGLEVEL_VERSION}.tar.gz | tar xvzf - -C /usr/bin && \
+    curl -LO https://github.com/linode/docker-machine-driver-linode/releases/download/${DOCKER_MACHINE_LINODE_VERSION}/docker-machine-driver-linode_linux-amd64.zip && \
+    unzip docker-machine-driver-linode_linux-amd64.zip -d /opt/drivers/management-state/bin && \
+    rm docker-machine-driver-linode_linux-amd64.zip
 
 ENV TINI_URL_amd64=https://github.com/krallin/tini/releases/download/${TINI_VERSION}/tini \
     TINI_URL_arm64=https://github.com/krallin/tini/releases/download/${TINI_VERSION}/tini-arm64 \
@@ -45,7 +49,7 @@ RUN curl -sLf ${!TINI_URL} > /usr/bin/tini && \
 
 ENV CATTLE_UI_PATH /usr/share/rancher/ui
 ENV CATTLE_UI_VERSION 2.3.2
-ENV CATTLE_CLI_VERSION v2.2.0
+ENV CATTLE_CLI_VERSION v2.3.0-rc2
 
 # Please update the api-ui-version in pkg/settings/settings.go when updating the version here.
 ENV CATTLE_API_UI_VERSION 1.1.6
@@ -61,6 +65,11 @@ VOLUME /var/log/auditlog
 RUN mkdir -p /usr/share/rancher/ui && \
     cd /usr/share/rancher/ui && \
     curl -sL https://releases.rancher.com/ui/${CATTLE_UI_VERSION}.tar.gz | tar xvzf - --strip-components=1 && \
+    mkdir -p assets/rancher-ui-driver-linode && \
+    cd assets/rancher-ui-driver-linode && \
+    curl -O https://linode.github.io/rancher-ui-driver-linode/releases/${LINODE_UI_DRIVER_VERSION}/component.js && \
+    curl -O https://linode.github.io/rancher-ui-driver-linode/releases/${LINODE_UI_DRIVER_VERSION}/component.css && \
+    curl -O https://linode.github.io/rancher-ui-driver-linode/releases/${LINODE_UI_DRIVER_VERSION}/linode.svg && \
     mkdir -p /usr/share/rancher/ui/api-ui && \
     cd /usr/share/rancher/ui/api-ui && \
     curl -sL https://releases.rancher.com/api-ui/${CATTLE_API_UI_VERSION}.tar.gz | tar xvzf - --strip-components=1 && \

@@ -332,8 +332,8 @@ func (l *Lifecycle) createAppRevision(obj *v3.App, template, notes string, faile
 	if failed {
 		release.Labels[failedLabel] = "true"
 	}
+	release.Spec.ProjectName = obj.Spec.ProjectName
 	release.Status.Answers = obj.Spec.Answers
-	release.Status.ProjectName = projectName
 	release.Status.ExternalID = obj.Spec.ExternalID
 	release.Status.ValuesYaml = obj.Spec.ValuesYaml
 	release.Status.Files = obj.Spec.Files
@@ -365,7 +365,7 @@ func (l *Lifecycle) writeKubeConfig(obj *v3.App, kubePath string, remove bool) e
 	} else if errors.IsNotFound(err) && remove {
 		token, err = l.SystemAccountManager.GetOrCreateProjectSystemToken(obj.Namespace)
 	} else if err == nil {
-		token, err = l.UserManager.EnsureToken(helmTokenPrefix+user.Name, description, user.Name)
+		token, err = l.UserManager.EnsureToken(helmTokenPrefix+user.Name, description, "helm", user.Name)
 	}
 	if err != nil {
 		return err

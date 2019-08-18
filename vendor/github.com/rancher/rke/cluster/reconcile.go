@@ -24,13 +24,18 @@ const (
 	EtcdPlaneNodesReplacedErr = "Etcd plane nodes are replaced. Stopping provisioning. Please restore your cluster from backup."
 )
 
-func ReconcileCluster(ctx context.Context, kubeCluster, currentCluster *Cluster, flags ExternalFlags) error {
+func ReconcileCluster(ctx context.Context, kubeCluster, currentCluster *Cluster, flags ExternalFlags, svcOptions *v3.KubernetesServicesOptions) error {
+	logrus.Debugf("[reconcile] currentCluster: %+v\n", currentCluster)
 	log.Infof(ctx, "[reconcile] Reconciling cluster state")
 	kubeCluster.UpdateWorkersOnly = flags.UpdateOnly
 	if currentCluster == nil {
 		log.Infof(ctx, "[reconcile] This is newly generated cluster")
 		kubeCluster.UpdateWorkersOnly = false
 		return nil
+	}
+	// If certificates are not present, this is broken state and should error out
+	if len(currentCluster.Certificates) == 0 {
+		return fmt.Errorf("Certificates are not present in cluster state, recover rkestate file or certificate information in cluster state")
 	}
 
 	kubeClient, err := k8s.NewClient(kubeCluster.LocalKubeConfigPath, kubeCluster.K8sWrapTransport)
@@ -39,8 +44,9 @@ func ReconcileCluster(ctx context.Context, kubeCluster, currentCluster *Cluster,
 	}
 	// sync node labels to define the toDelete labels
 	syncLabels(ctx, currentCluster, kubeCluster)
+	syncNodeRoles(ctx, currentCluster, kubeCluster)
 
-	if err := reconcileEtcd(ctx, currentCluster, kubeCluster, kubeClient); err != nil {
+	if err := reconcileEtcd(ctx, currentCluster, kubeCluster, kubeClient, svcOptions); err != nil {
 		return fmt.Errorf("Failed to reconcile etcd plane: %v", err)
 	}
 
@@ -51,6 +57,7 @@ func ReconcileCluster(ctx context.Context, kubeCluster, currentCluster *Cluster,
 	if err := reconcileControl(ctx, currentCluster, kubeCluster, kubeClient); err != nil {
 		return err
 	}
+
 	if kubeCluster.ForceDeployCerts {
 		if err := restartComponentsWhenCertChanges(ctx, currentCluster, kubeCluster); err != nil {
 			return err
@@ -165,7 +172,7 @@ func reconcileHost(ctx context.Context, toDeleteHost *hosts.Host, worker, etcd b
 	return nil
 }
 
-func reconcileEtcd(ctx context.Context, currentCluster, kubeCluster *Cluster, kubeClient *kubernetes.Clientset) error {
+func reconcileEtcd(ctx context.Context, currentCluster, kubeCluster *Cluster, kubeClient *kubernetes.Clientset, svcOptions *v3.KubernetesServicesOptions) error {
 	log.Infof(ctx, "[reconcile] Check etcd hosts to be deleted")
 	if isEtcdPlaneReplaced(ctx, currentCluster, kubeCluster) {
 		logrus.Warnf("%v", EtcdPlaneNodesReplacedErr)
@@ -177,6 +184,7 @@ func reconcileEtcd(ctx context.Context, currentCluster, kubeCluster *Cluster, ku
 
 	etcdToDelete := hosts.GetToDeleteHosts(currentCluster.EtcdHosts, kubeCluster.EtcdHosts, kubeCluster.InactiveHosts, false)
 	for _, etcdHost := range etcdToDelete {
+		etcdHost.IsEtcd = false
 		if err := services.RemoveEtcdMember(ctx, etcdHost, kubeCluster.EtcdHosts, currentCluster.LocalConnDialerFactory, clientCert, clientkey); err != nil {
 			log.Warnf(ctx, "[reconcile] %v", err)
 			continue
@@ -213,7 +221,7 @@ func reconcileEtcd(ctx context.Context, currentCluster, kubeCluster *Cluster, ku
 
 		etcdNodePlanMap := make(map[string]v3.RKEConfigNodePlan)
 		for _, etcdReadyHost := range kubeCluster.EtcdReadyHosts {
-			etcdNodePlanMap[etcdReadyHost.Address] = BuildRKEConfigNodePlan(ctx, kubeCluster, etcdReadyHost, etcdReadyHost.DockerInfo)
+			etcdNodePlanMap[etcdReadyHost.Address] = BuildRKEConfigNodePlan(ctx, kubeCluster, etcdReadyHost, etcdReadyHost.DockerInfo, svcOptions)
 		}
 		// this will start the newly added etcd node and make sure it started correctly before restarting other node
 		// https://github.com/etcd-io/etcd/blob/master/Documentation/op-guide/runtime-configuration.md#add-a-new-member
@@ -235,6 +243,21 @@ func syncLabels(ctx context.Context, currentCluster, kubeCluster *Cluster) {
 						host.ToDelLabels[k] = v
 					}
 				}
+				break
+			}
+		}
+	}
+}
+
+func syncNodeRoles(ctx context.Context, currentCluster, kubeCluster *Cluster) {
+	currentHosts := hosts.GetUniqueHostList(currentCluster.EtcdHosts, currentCluster.ControlPlaneHosts, currentCluster.WorkerHosts)
+	configHosts := hosts.GetUniqueHostList(kubeCluster.EtcdHosts, kubeCluster.ControlPlaneHosts, kubeCluster.WorkerHosts)
+	for _, host := range configHosts {
+		for _, currentHost := range currentHosts {
+			if host.Address == currentHost.Address {
+				currentHost.IsWorker = host.IsWorker
+				currentHost.IsEtcd = host.IsEtcd
+				currentHost.IsControl = host.IsControl
 				break
 			}
 		}
@@ -343,11 +366,18 @@ func checkCertificateChanges(ctx context.Context, currentCluster, kubeCluster *C
 }
 
 func isEtcdPlaneReplaced(ctx context.Context, currentCluster, kubeCluster *Cluster) bool {
-	etcdToDeleteInactive := hosts.GetToDeleteHosts(currentCluster.EtcdHosts, kubeCluster.EtcdHosts, kubeCluster.InactiveHosts, true)
+	numCurrentEtcdHosts := len(currentCluster.EtcdHosts)
+	// We had and have no etcd hosts, nothing was replaced
+	if numCurrentEtcdHosts == 0 && len(kubeCluster.EtcdHosts) == 0 {
+		return false
+	}
+
 	// old etcd nodes are down, we added new ones
-	if len(etcdToDeleteInactive) == len(currentCluster.EtcdHosts) {
+	numEtcdToDeleteInactive := len(hosts.GetToDeleteHosts(currentCluster.EtcdHosts, kubeCluster.EtcdHosts, kubeCluster.InactiveHosts, true))
+	if numEtcdToDeleteInactive == numCurrentEtcdHosts {
 		return true
 	}
+
 	// one or more etcd nodes are removed from cluster.yaml and replaced
 	if len(hosts.GetHostListIntersect(kubeCluster.EtcdHosts, currentCluster.EtcdHosts)) == 0 {
 		return true

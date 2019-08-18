@@ -23,22 +23,22 @@ const (
 	ctrbMGMTController        = "mgmt-auth-crtb-controller"
 )
 
-var clusterManagmentPlaneResources = []string{
-	"catalogtemplates",
-	"catalogtemplateversions",
-	"clusteralertrules",
-	"clusteralertgroups",
-	"clustercatalogs",
-	"clusterevents",
-	"clusterloggings",
-	"clustermonitorgraphs",
-	"clusterregistrationtokens",
-	"clusterroletemplatebindings",
-	"nodes",
-	"nodepools",
-	"notifiers",
-	"podsecuritypolicytemplateprojectbindings",
-	"projects",
+var clusterManagmentPlaneResources = map[string]string{
+	"catalogtemplates":                         "management.cattle.io",
+	"catalogtemplateversions":                  "management.cattle.io",
+	"clusteralertrules":                        "management.cattle.io",
+	"clusteralertgroups":                       "management.cattle.io",
+	"clustercatalogs":                          "management.cattle.io",
+	"clusterloggings":                          "management.cattle.io",
+	"clustermonitorgraphs":                     "management.cattle.io",
+	"clusterregistrationtokens":                "management.cattle.io",
+	"clusterroletemplatebindings":              "management.cattle.io",
+	"etcdbackups":                              "management.cattle.io",
+	"nodes":                                    "management.cattle.io",
+	"nodepools":                                "management.cattle.io",
+	"notifiers":                                "management.cattle.io",
+	"podsecuritypolicytemplateprojectbindings": "management.cattle.io",
+	"projects":                                 "management.cattle.io",
 }
 
 type crtbLifecycle struct {
@@ -124,8 +124,11 @@ func (c *crtbLifecycle) reconcilBindings(binding *v3.ClusterRoleTemplateBinding)
 	if cluster == nil {
 		return errors.Errorf("cannot create binding because cluster %v was not found", clusterName)
 	}
-
-	isOwnerRole := binding.RoleTemplateName == "cluster-owner"
+	// if roletemplate is not builtin, check if it's inherited/cloned
+	isOwnerRole, err := c.mgr.checkReferencedRoles(binding.RoleTemplateName)
+	if err != nil {
+		return err
+	}
 	var clusterRoleName string
 	if isOwnerRole {
 		clusterRoleName = strings.ToLower(fmt.Sprintf("%v-clusterowner", clusterName))

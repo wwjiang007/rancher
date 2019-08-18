@@ -24,6 +24,7 @@ auditLog:
 addLocal: "auto"
 
 # Image for collecting rancher audit logs.
+# Important: update pkg/image/export/main.go when this default image is changed, so that it's reflected accordingly in rancher-images.txt generated for air-gapped setups.
 busyboxImage: busybox
 
 # Add debug flag to Rancher server
@@ -52,7 +53,7 @@ ingress:
 
   # configurationSnippet - Add additional Nginx configuration. This example statically sets a header on the ingress.
   # configurationSnippet: |
-  #   more_set_input_headers X-Forwarded-Host {{ .Values.hostname }};
+  #   more_set_input_headers "X-Forwarded-Host: {{ .Values.hostname }}";
 
   tls:
     # options: rancher, letsEncrypt, secret

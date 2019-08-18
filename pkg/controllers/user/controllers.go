@@ -35,17 +35,13 @@ import (
 	"github.com/rancher/rancher/pkg/controllers/user/servicemonitor"
 	"github.com/rancher/rancher/pkg/controllers/user/systemimage"
 	"github.com/rancher/rancher/pkg/controllers/user/targetworkloadservice"
+	"github.com/rancher/rancher/pkg/controllers/user/windows"
 	"github.com/rancher/rancher/pkg/controllers/user/workload"
 	pkgmonitoring "github.com/rancher/rancher/pkg/monitoring"
 	managementv3 "github.com/rancher/types/apis/management.cattle.io/v3"
 	projectclient "github.com/rancher/types/client/project/v3"
 	"github.com/rancher/types/config"
 	"github.com/rancher/types/factory"
-
-	// init upgrade implement
-	_ "github.com/rancher/rancher/pkg/controllers/user/alert/deployer"
-	_ "github.com/rancher/rancher/pkg/controllers/user/logging/deployer"
-	_ "github.com/rancher/rancher/pkg/controllers/user/pipeline/upgrade"
 )
 
 func Register(ctx context.Context, cluster *config.UserContext, clusterRec *managementv3.Cluster, kubeConfigGetter common.KubeConfigGetter, clusterManager healthsyncer.ClusterControllerLifecycle) error {
@@ -73,6 +69,8 @@ func Register(ctx context.Context, cluster *config.UserContext, clusterRec *mana
 	monitoring.Register(ctx, cluster)
 	istio.Register(ctx, cluster)
 	certsexpiration.Register(ctx, cluster)
+	ingresshostgen.Register(ctx, cluster.UserOnlyContext())
+	windows.Register(ctx, clusterRec, cluster)
 
 	if clusterRec.Spec.LocalClusterAuthEndpoint.Enabled {
 		err := clusterauthtoken.CRDSetup(ctx, cluster.UserOnlyContext())
@@ -98,6 +96,7 @@ func RegisterFollower(ctx context.Context, cluster *config.UserContext, kubeConf
 	cluster.RBAC.ClusterRoleBindings("").Controller()
 	cluster.RBAC.RoleBindings("").Controller()
 	cluster.Core.Endpoints("").Controller()
+	cluster.APIAggregation.APIServices("").Controller()
 	return nil
 }
 
@@ -109,7 +108,6 @@ func RegisterUserOnly(ctx context.Context, cluster *config.UserOnlyContext) erro
 	dnsrecord.Register(ctx, cluster)
 	externalservice.Register(ctx, cluster)
 	ingress.Register(ctx, cluster)
-	ingresshostgen.Register(ctx, cluster)
 	nslabels.Register(ctx, cluster)
 	targetworkloadservice.Register(ctx, cluster)
 	workload.Register(ctx, cluster)

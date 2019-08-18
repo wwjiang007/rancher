@@ -9,6 +9,7 @@ import (
 	"github.com/rancher/norman/signal"
 	"github.com/rancher/norman/store/proxy"
 	"github.com/rancher/norman/types"
+	apiregistrationv1 "github.com/rancher/types/apis/apiregistration.k8s.io/v1"
 	appsv1beta2 "github.com/rancher/types/apis/apps/v1beta2"
 	autoscaling "github.com/rancher/types/apis/autoscaling/v2beta2"
 	batchv1 "github.com/rancher/types/apis/batch/v1"
@@ -20,10 +21,12 @@ import (
 	managementv3 "github.com/rancher/types/apis/management.cattle.io/v3"
 	managementSchema "github.com/rancher/types/apis/management.cattle.io/v3/schema"
 	monitoringv1 "github.com/rancher/types/apis/monitoring.coreos.com/v1"
+	istiov1alpha3 "github.com/rancher/types/apis/networking.istio.io/v1alpha3"
 	knetworkingv1 "github.com/rancher/types/apis/networking.k8s.io/v1"
 	projectv3 "github.com/rancher/types/apis/project.cattle.io/v3"
 	projectSchema "github.com/rancher/types/apis/project.cattle.io/v3/schema"
 	rbacv1 "github.com/rancher/types/apis/rbac.authorization.k8s.io/v1"
+	storagev1 "github.com/rancher/types/apis/storage.k8s.io/v1"
 	"github.com/rancher/types/config/dialer"
 	"github.com/rancher/types/peermanager"
 	"github.com/rancher/types/user"
@@ -57,6 +60,7 @@ type ScaledContext struct {
 	Project    projectv3.Interface
 	RBAC       rbacv1.Interface
 	Core       corev1.Interface
+	Storage    storagev1.Interface
 }
 
 func (c *ScaledContext) controllers() []controller.Starter {
@@ -113,7 +117,6 @@ func NewScaledContext(config rest.Config) (*ScaledContext, error) {
 	if err != nil {
 		return nil, err
 	}
-
 	dynamicConfig := config
 	if dynamicConfig.NegotiatedSerializer == nil {
 		dynamicConfig.NegotiatedSerializer = dynamic.NegotiatedSerializer
@@ -178,21 +181,25 @@ type UserContext struct {
 	APIExtClient      clientset.Interface
 	K8sClient         kubernetes.Interface
 
-	Apps         appsv1beta2.Interface
-	Autoscaling  autoscaling.Interface
-	Project      projectv3.Interface
-	Core         corev1.Interface
-	RBAC         rbacv1.Interface
-	Extensions   extv1beta1.Interface
-	BatchV1      batchv1.Interface
-	BatchV1Beta1 batchv1beta1.Interface
-	Networking   knetworkingv1.Interface
-	Monitoring   monitoringv1.Interface
-	Cluster      clusterv3.Interface
+	APIAggregation apiregistrationv1.Interface
+	Apps           appsv1beta2.Interface
+	Autoscaling    autoscaling.Interface
+	Project        projectv3.Interface
+	Core           corev1.Interface
+	RBAC           rbacv1.Interface
+	Extensions     extv1beta1.Interface
+	BatchV1        batchv1.Interface
+	BatchV1Beta1   batchv1beta1.Interface
+	Networking     knetworkingv1.Interface
+	Monitoring     monitoringv1.Interface
+	Cluster        clusterv3.Interface
+	Istio          istiov1alpha3.Interface
+	Storage        storagev1.Interface
 }
 
 func (w *UserContext) controllers() []controller.Starter {
 	return []controller.Starter{
+		w.APIAggregation,
 		w.Apps,
 		w.Project,
 		w.Core,
@@ -203,6 +210,7 @@ func (w *UserContext) controllers() []controller.Starter {
 		w.Networking,
 		w.Monitoring,
 		w.Cluster,
+		w.Storage,
 	}
 }
 
@@ -224,6 +232,8 @@ func (w *UserContext) UserOnlyContext() *UserOnlyContext {
 		BatchV1Beta1: w.BatchV1Beta1,
 		Monitoring:   w.Monitoring,
 		Cluster:      w.Cluster,
+		Istio:        w.Istio,
+		Storage:      w.Storage,
 	}
 }
 
@@ -234,20 +244,24 @@ type UserOnlyContext struct {
 	UnversionedClient rest.Interface
 	K8sClient         kubernetes.Interface
 
-	Apps         appsv1beta2.Interface
-	Autoscaling  autoscaling.Interface
-	Project      projectv3.Interface
-	Core         corev1.Interface
-	RBAC         rbacv1.Interface
-	Extensions   extv1beta1.Interface
-	BatchV1      batchv1.Interface
-	BatchV1Beta1 batchv1beta1.Interface
-	Monitoring   monitoringv1.Interface
-	Cluster      clusterv3.Interface
+	APIRegistration apiregistrationv1.Interface
+	Apps            appsv1beta2.Interface
+	Autoscaling     autoscaling.Interface
+	Project         projectv3.Interface
+	Core            corev1.Interface
+	RBAC            rbacv1.Interface
+	Extensions      extv1beta1.Interface
+	BatchV1         batchv1.Interface
+	BatchV1Beta1    batchv1beta1.Interface
+	Monitoring      monitoringv1.Interface
+	Cluster         clusterv3.Interface
+	Istio           istiov1alpha3.Interface
+	Storage         storagev1.Interface
 }
 
 func (w *UserOnlyContext) controllers() []controller.Starter {
 	return []controller.Starter{
+		w.APIRegistration,
 		w.Apps,
 		w.Project,
 		w.Core,
@@ -256,6 +270,7 @@ func (w *UserOnlyContext) controllers() []controller.Starter {
 		w.BatchV1,
 		w.BatchV1Beta1,
 		w.Monitoring,
+		w.Storage,
 	}
 }
 
@@ -372,6 +387,11 @@ func NewUserContext(scaledContext *ScaledContext, config rest.Config, clusterNam
 		return nil, err
 	}
 
+	context.Storage, err = storagev1.NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+
 	context.RBAC, err = rbacv1.NewForConfig(config)
 	if err != nil {
 		return nil, err
@@ -403,7 +423,21 @@ func NewUserContext(scaledContext *ScaledContext, config rest.Config, clusterNam
 	}
 
 	context.Monitoring, err = monitoringv1.NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+
 	context.Cluster, err = clusterv3.NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+
+	context.Istio, err = istiov1alpha3.NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+
+	context.APIAggregation, err = apiregistrationv1.NewForConfig(config)
 	if err != nil {
 		return nil, err
 	}
@@ -466,6 +500,11 @@ func NewUserOnlyContext(config rest.Config) (*UserOnlyContext, error) {
 		return nil, err
 	}
 
+	context.Storage, err = storagev1.NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+
 	context.RBAC, err = rbacv1.NewForConfig(config)
 	if err != nil {
 		return nil, err
@@ -492,7 +531,21 @@ func NewUserOnlyContext(config rest.Config) (*UserOnlyContext, error) {
 	}
 
 	context.Monitoring, err = monitoringv1.NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+
 	context.Cluster, err = clusterv3.NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+
+	context.Istio, err = istiov1alpha3.NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+
+	context.APIRegistration, err = apiregistrationv1.NewForConfig(config)
 	if err != nil {
 		return nil, err
 	}

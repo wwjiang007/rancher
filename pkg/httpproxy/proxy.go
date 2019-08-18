@@ -22,6 +22,9 @@ const (
 	Cookie       = "Cookie"
 	APISetCookie = "X-Api-Set-Cookie-Header"
 	APICookie    = "X-Api-Cookie-Header"
+	hostRegex    = "[A-Za-z0-9-]+"
+	CSP          = "Content-Security-Policy"
+	XContentType = "X-Content-Type-Options"
 )
 
 var (
@@ -57,6 +60,13 @@ func (p *proxy) isAllowed(host string) bool {
 		if strings.HasPrefix(valid, "*") && strings.HasSuffix(host, valid[1:]) {
 			return true
 		}
+
+		if strings.Contains(valid, ".%.") || strings.HasPrefix(valid, "%.") {
+			r := constructRegex(valid)
+			if match := r.MatchString(host); match {
+				return true
+			}
+		}
 	}
 
 	return false
@@ -72,20 +82,24 @@ func NewProxy(prefix string, validHosts Supplier, scaledContext *config.ScaledCo
 	return &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
 			if err := p.proxy(req); err != nil {
-				logrus.Infof("Failed to proxy %v: %v", req, err)
+				logrus.Infof("Failed to proxy: %v", err)
 			}
 		},
-		ModifyResponse: replaceSetCookies,
+		ModifyResponse: setModifiedHeaders,
 	}
 }
 
-func replaceSetCookies(res *http.Response) error {
+func setModifiedHeaders(res *http.Response) error {
+	// replace set cookies
 	res.Header.Del(APISetCookie)
 	// There may be multiple set cookies
 	for _, setCookie := range res.Header[SetCookie] {
 		res.Header.Add(APISetCookie, setCookie)
 	}
 	res.Header.Del(SetCookie)
+	// add security headers (similar to raw.githubusercontent)
+	res.Header.Set(CSP, "default-src 'none'; style-src 'unsafe-inline'; sandbox")
+	res.Header.Set(XContentType, "nosniff")
 	return nil
 }
 
@@ -109,8 +123,10 @@ func (p *proxy) proxy(req *http.Request) error {
 
 	destURL.RawQuery = req.URL.RawQuery
 
-	if !p.isAllowed(destURL.Host) {
-		return fmt.Errorf("invalid host: %v", destURL.Host)
+	destURLHostname := destURL.Hostname()
+
+	if !p.isAllowed(destURLHostname) {
+		return fmt.Errorf("invalid host: %v", destURLHostname)
 	}
 
 	headerCopy := http.Header{}
@@ -132,7 +148,7 @@ func (p *proxy) proxy(req *http.Request) error {
 		headerCopy[name] = copy
 	}
 
-	req.Host = destURL.Hostname()
+	req.Host = destURLHostname
 	req.URL = destURL
 	req.Header = headerCopy
 
@@ -161,4 +177,21 @@ func replaceCookies(req *http.Request) {
 		req.Header.Set(Cookie, cookie)
 		req.Header.Del(APICookie)
 	}
+}
+
+func constructRegex(host string) *regexp.Regexp {
+	// incoming host "ec2.%.amazonaws.com"
+	// Converted to regex "^ec2\.[A-Za-z0-9-]+\.amazonaws\.com$"
+	parts := strings.Split(host, ".")
+	for i, part := range parts {
+		if part == "%" {
+			parts[i] = hostRegex
+		} else {
+			parts[i] = regexp.QuoteMeta(part)
+		}
+	}
+
+	str := "^" + strings.Join(parts, "\\.") + "$"
+
+	return regexp.MustCompile(str)
 }

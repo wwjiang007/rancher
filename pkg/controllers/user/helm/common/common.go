@@ -119,12 +119,14 @@ func GenerateRandomPort() string {
 func InstallCharts(tempDirs *HelmPath, port string, obj *v3.App) error {
 	logrus.Debugf("InstallCharts - helm path info %+v\n", tempDirs)
 	extraArgs := GetExtraArgs(obj)
+	timeoutArgs := getTimeoutArgs(obj)
 	setValues, err := GenerateAnswerSetValues(obj, tempDirs, extraArgs)
 	if err != nil {
 		return err
 	}
 	commands := make([]string, 0)
-	commands = append([]string{"upgrade", "--install", "--namespace", obj.Spec.TargetNamespace, obj.Name}, setValues...)
+	commands = append([]string{"upgrade", "--install", "--namespace", obj.Spec.TargetNamespace, obj.Name}, timeoutArgs...)
+	commands = append(commands, setValues...)
 	commands = append(commands, tempDirs.AppDirInJail)
 
 	if v3.AppConditionForceUpgrade.IsUnknown(obj) {
@@ -160,6 +162,18 @@ func InstallCharts(tempDirs *HelmPath, port string, obj *v3.App) error {
 	return nil
 }
 
+// getTimeoutArgs generates the appropriate arguments for helm depending on the app's timeout and wait fields
+func getTimeoutArgs(app *v3.App) []string {
+	var timeoutArgs []string
+
+	if app.Spec.Wait {
+		timeoutArgs = append(timeoutArgs, "--wait")
+	}
+	timeoutArgs = append(timeoutArgs, "--timeout", strconv.Itoa(app.Spec.Timeout))
+
+	return timeoutArgs
+}
+
 func GenerateAnswerSetValues(app *v3.App, tempDir *HelmPath, extraArgs map[string]string) ([]string, error) {
 	setValues := []string{}
 	// a user-supplied values file will overridden default values.yaml
@@ -179,10 +193,13 @@ func GenerateAnswerSetValues(app *v3.App, tempDir *HelmPath, extraArgs map[strin
 			if _, ok := extraArgs[k]; ok {
 				continue
 			}
-			values = append(values, fmt.Sprintf("%s=%s", k, v))
+			// helm will only accept escaped commas in values
+			escapedValue := fmt.Sprintf("%s=%s", k, escapeCommas(v))
+			values = append(values, escapedValue)
 		}
 		for k, v := range extraArgs {
-			values = append(values, fmt.Sprintf("%s=%s", k, v))
+			escapedValue := fmt.Sprintf("%s=%s", k, escapeCommas(v))
+			values = append(values, escapedValue)
 		}
 		setValues = append(setValues, "--set", strings.Join(values, ","))
 	}
@@ -216,5 +233,19 @@ func JailCommand(cmd *exec.Cmd, jailPath string) (*exec.Cmd, error) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{}
 	cmd.SysProcAttr.Credential = cred
 	cmd.SysProcAttr.Chroot = jailPath
+	cmd.Env = jailer.WhitelistEnvvars(cmd.Env)
 	return cmd, nil
+}
+
+// escapeCommas will escape the commas in a string, unless helm would identify it as a list
+func escapeCommas(value string) string {
+	if len(value) == 0 {
+		return value
+	}
+	// as far as helm is concerned, an answer starting with '{' is a list
+	// commas in lists are not escaped for users as they are also used as delimiters
+	if strings.HasPrefix(value, "{") {
+		return value
+	}
+	return strings.Replace(value, ",", "\\,", -1)
 }

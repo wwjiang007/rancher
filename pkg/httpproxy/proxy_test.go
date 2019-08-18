@@ -1,6 +1,7 @@
 package httpproxy
 
 import (
+	"fmt"
 	"net/http"
 	"testing"
 
@@ -16,9 +17,11 @@ func TestReplaceSetCookies(t *testing.T) {
 		},
 	}
 
-	replaceSetCookies(DummyRequest)
+	setModifiedHeaders(DummyRequest)
 	assert.Equal(t, []string{"test1=abc", "test2=def", "test3=ghi"}, DummyRequest.Header[APISetCookie])
 	assert.Equal(t, 0, len(DummyRequest.Header[SetCookie]))
+	assert.Equal(t, []string{"default-src 'none'; style-src 'unsafe-inline'; sandbox"}, DummyRequest.Header[CSP])
+	assert.Equal(t, []string{"nosniff"}, DummyRequest.Header[XContentType])
 
 	DummyRequest = &http.Response{
 		Header: map[string][]string{
@@ -27,10 +30,12 @@ func TestReplaceSetCookies(t *testing.T) {
 		},
 	}
 
-	replaceSetCookies(DummyRequest)
+	setModifiedHeaders(DummyRequest)
 	// Should delete original api set cookie
 	assert.Equal(t, []string{"test1=abc", "test2=def", "test3=ghi"}, DummyRequest.Header[APISetCookie])
 	assert.Equal(t, 0, len(DummyRequest.Header[SetCookie]))
+	assert.Equal(t, []string{"default-src 'none'; style-src 'unsafe-inline'; sandbox"}, DummyRequest.Header[CSP])
+	assert.Equal(t, []string{"nosniff"}, DummyRequest.Header[XContentType])
 }
 
 // ReplaceCookie should delete  current cookie and replace it with api cookie if available
@@ -123,4 +128,97 @@ func TestIsAllowed(t *testing.T) {
 
 	assert.Equal(t, true, dummyProxy.isAllowed("123test1.com"))
 	assert.Equal(t, false, dummyProxy.isAllowed("123test1.io"))
+
+	dummyProxy = &proxy{
+		validHostsSupplier: func() []string {
+			return []string{"foo.%.alpha.com", "test2.io", "test3.org"}
+		},
+	}
+
+	assert.Equal(t, false, dummyProxy.isAllowed("123test1.com"))
+	assert.Equal(t, true, dummyProxy.isAllowed("foo.bar.alpha.com"))
+	assert.Equal(t, false, dummyProxy.isAllowed("foo.bar.baz.alpha.com"))
+}
+
+func TestConstructRegex(t *testing.T) {
+	type test struct {
+		host          string
+		whitelistItem string
+		found         bool
+		description   string
+	}
+
+	tests := []test{
+		{
+			host:          "ec2.us-west-1.amazonaws.com",
+			whitelistItem: "ec2.%.amazonaws.com",
+			found:         true,
+			description:   "base case",
+		},
+		{
+			host:          "ec2.amazonaws.com",
+			whitelistItem: "%.amazonaws.com",
+			found:         true,
+			description:   "base case",
+		},
+		{
+			host:          "foo.ec2.amazonaws.com",
+			whitelistItem: "%.amazonaws.com",
+			found:         false,
+			description:   "base case",
+		},
+		{
+			host:          "ec2.us-west-1.thing.foo.amazonaws.com",
+			whitelistItem: "ec2.%.amazonaws.com",
+			found:         false,
+			description:   "addition content in the middle",
+		},
+		{
+			host:          "thing.us-west-1.amazonaws.com",
+			whitelistItem: "ec2.%.amazonaws.com",
+			found:         false,
+			description:   "should not match prefix",
+		},
+		{
+			host:          "ec2.us-west-1.amazonaws.com.cn",
+			whitelistItem: "ec2.%.amazonaws.com",
+			found:         false,
+			description:   "should not match suffix",
+		},
+		{
+			host:          "iam.cn-north-1.amazonaws.com.cn",
+			whitelistItem: "iam.%.amazonaws.com.cn",
+			found:         true,
+			description:   "base case",
+		},
+		{
+			host:          "iam.cn-north-1.thing.foo.amazonaws.com.cn",
+			whitelistItem: "iam.%.amazonaws.com.cn",
+			found:         false,
+			description:   "addition content in the middle",
+		},
+		{
+			host:          "thing.iam.cn-north-1.amazonaws.com.cn",
+			whitelistItem: "iam.%.amazonaws.com.cn",
+			found:         false,
+			description:   "should not match prefix",
+		},
+		{
+			host:          "iam.cn-north-1.amazonaws.com",
+			whitelistItem: "iam.%.amazonaws.com.cn",
+			found:         false,
+			description:   "should not match suffix",
+		},
+	}
+
+	for _, scenario := range tests {
+		r := constructRegex(scenario.whitelistItem)
+		match := r.MatchString(scenario.host)
+		assert.Equal(t, scenario.found, match,
+			fmt.Sprintf("failed on host %v and whitelist item %v, %v",
+				scenario.host,
+				scenario.whitelistItem,
+				scenario.description,
+			))
+	}
 }
