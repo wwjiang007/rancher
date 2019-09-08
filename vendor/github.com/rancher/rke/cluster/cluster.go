@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rancher/rke/metadata"
+	"github.com/rancher/rke/pki/cert"
 
 	"github.com/docker/docker/api/types"
 	"github.com/rancher/rke/authz"
@@ -16,6 +16,7 @@ import (
 	"github.com/rancher/rke/hosts"
 	"github.com/rancher/rke/k8s"
 	"github.com/rancher/rke/log"
+	"github.com/rancher/rke/metadata"
 	"github.com/rancher/rke/pki"
 	"github.com/rancher/rke/services"
 	"github.com/rancher/rke/util"
@@ -26,7 +27,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/client-go/util/cert"
+	"k8s.io/client-go/transport"
 )
 
 type Cluster struct {
@@ -46,7 +47,7 @@ type Cluster struct {
 	EtcdReadyHosts                   []*hosts.Host
 	ForceDeployCerts                 bool
 	InactiveHosts                    []*hosts.Host
-	K8sWrapTransport                 k8s.WrapTransport
+	K8sWrapTransport                 transport.WrapperFunc
 	KubeClient                       *kubernetes.Clientset
 	KubernetesServiceIP              net.IP
 	LocalKubeConfigPath              string
@@ -251,7 +252,7 @@ func rebuildLocalAdminConfig(ctx context.Context, kubeCluster *Cluster) error {
 			newConfig = pki.GetKubeConfigX509WithData(kubeURL, kubeCluster.ClusterName, pki.KubeAdminCertName, caData, crtData, keyData)
 		}
 		if err := pki.DeployAdminConfig(ctx, newConfig, kubeCluster.LocalKubeConfigPath); err != nil {
-			return fmt.Errorf("Failed to redeploy local admin config with new host")
+			return fmt.Errorf("Failed to redeploy local admin config with new host: %v", err)
 		}
 		workingConfig = newConfig
 		if _, err := GetK8sVersion(kubeCluster.LocalKubeConfigPath, kubeCluster.K8sWrapTransport); err == nil {
@@ -264,9 +265,9 @@ func rebuildLocalAdminConfig(ctx context.Context, kubeCluster *Cluster) error {
 	return nil
 }
 
-func isLocalConfigWorking(ctx context.Context, localKubeConfigPath string, k8sWrapTransport k8s.WrapTransport) bool {
+func isLocalConfigWorking(ctx context.Context, localKubeConfigPath string, k8sWrapTransport transport.WrapperFunc) bool {
 	if _, err := GetK8sVersion(localKubeConfigPath, k8sWrapTransport); err != nil {
-		log.Infof(ctx, "[reconcile] Local config is not valid, rebuilding admin config")
+		log.Infof(ctx, "[reconcile] Local config is not valid (error: %v), rebuilding admin config", err)
 		return false
 	}
 	return true
@@ -353,7 +354,7 @@ func (c *Cluster) SyncLabelsAndTaints(ctx context.Context, currentCluster *Clust
 	if currentCluster != nil {
 		cpToDelete := hosts.GetToDeleteHosts(currentCluster.ControlPlaneHosts, c.ControlPlaneHosts, c.InactiveHosts, false)
 		if len(cpToDelete) == len(currentCluster.ControlPlaneHosts) {
-			log.Infof(ctx, "[sync] Cleaning left control plane nodes from reconcilation")
+			log.Infof(ctx, "[sync] Cleaning left control plane nodes from reconciliation")
 			for _, toDeleteHost := range cpToDelete {
 				if err := cleanControlNode(ctx, c, currentCluster, toDeleteHost); err != nil {
 					return err
@@ -361,6 +362,9 @@ func (c *Cluster) SyncLabelsAndTaints(ctx context.Context, currentCluster *Clust
 			}
 		}
 	}
+
+	// sync node taints. Add or remove taints from hosts
+	syncTaints(ctx, currentCluster, c)
 
 	if len(c.ControlPlaneHosts) > 0 {
 		log.Infof(ctx, "[sync] Syncing nodes Labels and Taints")

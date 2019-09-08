@@ -95,11 +95,9 @@ func driverMetadataTypes(schemas *types.Schemas) *types.Schemas {
 		AddMapperForType(&Version, v3.RKEK8sSystemImage{}, m.Drop{Field: "namespaceId"}).
 		AddMapperForType(&Version, v3.RKEK8sServiceOption{}, m.Drop{Field: "namespaceId"}).
 		AddMapperForType(&Version, v3.RKEAddon{}, m.Drop{Field: "namespaceId"}).
-		AddMapperForType(&Version, v3.RKEK8sWindowsSystemImage{}, m.Drop{Field: "namespaceId"}).
 		MustImport(&Version, v3.RKEK8sSystemImage{}).
 		MustImport(&Version, v3.RKEK8sServiceOption{}).
-		MustImport(&Version, v3.RKEAddon{}).
-		MustImport(&Version, v3.RKEK8sWindowsSystemImage{})
+		MustImport(&Version, v3.RKEAddon{})
 }
 
 func catalogTypes(schemas *types.Schemas) *types.Schemas {
@@ -343,13 +341,24 @@ func nodeTypes(schemas *types.Schemas) *types.Schemas {
 		AddMapperForType(&Version, v3.NodeDriver{}, m.DisplayName{}).
 		AddMapperForType(&Version, v3.NodeTemplate{}, m.DisplayName{}).
 		MustImport(&Version, v3.PublicEndpoint{}).
-		MustImport(&Version, v3.NodePool{}).
+		MustImportAndCustomize(&Version, v3.NodePool{}, func(schema *types.Schema) {
+			schema.ResourceFields["driver"] = types.Field{
+				Type:     "string",
+				CodeName: "Driver",
+				Create:   false,
+				Update:   false,
+			}
+		}).
 		MustImport(&Version, v3.NodeDrainInput{}).
 		MustImportAndCustomize(&Version, v3.Node{}, func(schema *types.Schema) {
 			labelField := schema.ResourceFields["labels"]
 			labelField.Create = true
 			labelField.Update = true
 			schema.ResourceFields["labels"] = labelField
+			annotationField := schema.ResourceFields["annotations"]
+			annotationField.Create = true
+			annotationField.Update = true
+			schema.ResourceFields["annotations"] = annotationField
 			unschedulable := schema.ResourceFields["unschedulable"]
 			unschedulable.Create = false
 			unschedulable.Update = false
@@ -867,16 +876,21 @@ func clusterTemplateTypes(schemas *types.Schemas) *types.Schemas {
 		TypeName("clusterTemplate", v3.ClusterTemplate{}).
 		TypeName("clusterTemplateRevision", v3.ClusterTemplateRevision{}).
 		AddMapperForType(&Version, v3.ClusterTemplate{}, m.Drop{Field: "namespaceId"}, m.DisplayName{}).
-		AddMapperForType(&Version, v3.ClusterTemplateRevision{}, m.Drop{Field: "namespaceId"}).
+		AddMapperForType(&Version, v3.ClusterTemplateRevision{}, m.Drop{Field: "namespaceId"}, m.DisplayName{}).
 		MustImport(&Version, v3.ClusterTemplateQuestionsOutput{}).
 		MustImport(&Version, v3.ClusterTemplate{}).
 		MustImportAndCustomize(&Version, v3.ClusterTemplateRevision{}, func(schema *types.Schema) {
+			schema.ResourceActions = map[string]types.Action{
+				"disable": {},
+				"enable":  {},
+			}
 			schema.CollectionActions = map[string]types.Action{
 				"listquestions": {
 					Output: "clusterTemplateQuestionsOutput",
 				},
 			}
 		})
+
 }
 
 func clusterScanTypes(schemas *types.Schemas) *types.Schemas {

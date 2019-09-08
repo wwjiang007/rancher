@@ -22,6 +22,7 @@ items:
       template:
         metadata:
           annotations:
+            scheduler.alpha.kubernetes.io/critical-pod: ''
             scheduler.alpha.kubernetes.io/tolerations: >-
               [{"key":"dedicated","operator":"Equal","value":"master","effect":"NoSchedule"}]
           labels:
@@ -36,6 +37,12 @@ items:
                       operator: NotIn
                       values:
                         - windows
+{{if .NodeSelector}}
+          nodeSelector:
+            {{ range $k, $v := .NodeSelector }}
+              {{ $k }}: "{{ $v }}"
+            {{ end }}
+{{end}}
           containers:
             - name: weave
               command:

@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rancher/norman/pkg/remotedialer"
 	"github.com/rancher/norman/types/slice"
 	"github.com/rancher/rancher/pkg/tunnelserver"
+	"github.com/rancher/remotedialer"
 	"github.com/rancher/rke/k8s"
 	"github.com/rancher/rke/services"
 	v3 "github.com/rancher/types/apis/management.cattle.io/v3"
@@ -186,9 +186,13 @@ func (f *Factory) DockerDialer(clusterName, machineName string) (dialer.Dialer, 
 
 	sessionKey := machineSessionKey(machine)
 	if f.TunnelServer.HasSession(sessionKey) {
+		network, address := "unix", "/var/run/docker.sock"
+		if machine.Status.InternalNodeStatus.NodeInfo.OperatingSystem == "windows" {
+			network, address = "npipe", "//./pipe/docker_engine"
+		}
 		d := f.TunnelServer.Dialer(sessionKey, 15*time.Second)
 		return func(string, string) (net.Conn, error) {
-			return d("unix", "/var/run/docker.sock")
+			return d(network, address)
 		}, nil
 	}
 

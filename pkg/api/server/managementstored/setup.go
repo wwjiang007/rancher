@@ -7,6 +7,7 @@ import (
 	"github.com/rancher/norman/store/crd"
 	"github.com/rancher/norman/store/proxy"
 	"github.com/rancher/norman/store/subtype"
+	"github.com/rancher/norman/store/transform"
 	"github.com/rancher/norman/types"
 	"github.com/rancher/rancher/pkg/api/customization/alert"
 	"github.com/rancher/rancher/pkg/api/customization/app"
@@ -17,6 +18,7 @@ import (
 	"github.com/rancher/rancher/pkg/api/customization/clusterscan"
 	"github.com/rancher/rancher/pkg/api/customization/clustertemplate"
 	"github.com/rancher/rancher/pkg/api/customization/cred"
+	"github.com/rancher/rancher/pkg/api/customization/etcdbackup"
 	"github.com/rancher/rancher/pkg/api/customization/feature"
 	"github.com/rancher/rancher/pkg/api/customization/globaldns"
 	"github.com/rancher/rancher/pkg/api/customization/globalresource"
@@ -25,6 +27,7 @@ import (
 	"github.com/rancher/rancher/pkg/api/customization/monitor"
 	"github.com/rancher/rancher/pkg/api/customization/multiclusterapp"
 	"github.com/rancher/rancher/pkg/api/customization/node"
+	"github.com/rancher/rancher/pkg/api/customization/nodepool"
 	"github.com/rancher/rancher/pkg/api/customization/nodetemplate"
 	"github.com/rancher/rancher/pkg/api/customization/pipeline"
 	"github.com/rancher/rancher/pkg/api/customization/podsecuritypolicytemplate"
@@ -40,6 +43,7 @@ import (
 	clustertemplatestore "github.com/rancher/rancher/pkg/api/store/clustertemplate"
 	featStore "github.com/rancher/rancher/pkg/api/store/feature"
 	globaldnsAPIStore "github.com/rancher/rancher/pkg/api/store/globaldns"
+	grbstore "github.com/rancher/rancher/pkg/api/store/globalrolebindings"
 	nodeStore "github.com/rancher/rancher/pkg/api/store/node"
 	nodeTemplateStore "github.com/rancher/rancher/pkg/api/store/nodetemplate"
 	"github.com/rancher/rancher/pkg/api/store/noopwatching"
@@ -52,6 +56,7 @@ import (
 	"github.com/rancher/rancher/pkg/auth/principals"
 	"github.com/rancher/rancher/pkg/auth/providerrefresh"
 	"github.com/rancher/rancher/pkg/auth/providers"
+	"github.com/rancher/rancher/pkg/auth/tokens"
 	"github.com/rancher/rancher/pkg/clustermanager"
 	"github.com/rancher/rancher/pkg/controllers/management/compose/common"
 	md "github.com/rancher/rancher/pkg/controllers/management/kontainerdrivermetadata"
@@ -120,7 +125,6 @@ func Setup(ctx context.Context, apiContext *config.ScaledContext, clusterManager
 		client.RKEK8sSystemImageType,
 		client.RKEK8sServiceOptionType,
 		client.RKEAddonType,
-		client.RKEK8sWindowsSystemImageType,
 		client.RoleTemplateType,
 		client.SettingType,
 		client.TemplateType,
@@ -162,6 +166,7 @@ func Setup(ctx context.Context, apiContext *config.ScaledContext, clusterManager
 	Feature(schemas)
 	Preference(schemas, apiContext)
 	ClusterRegistrationTokens(schemas)
+	Tokens(ctx, schemas, apiContext)
 	NodeTemplates(schemas, apiContext)
 	LoggingTypes(schemas, apiContext, clusterManager, k8sProxy)
 	Alert(schemas, apiContext)
@@ -170,6 +175,7 @@ func Setup(ctx context.Context, apiContext *config.ScaledContext, clusterManager
 	ProjectRoleTemplateBinding(schemas, apiContext)
 	TemplateContent(schemas)
 	PodSecurityPolicyTemplate(schemas, apiContext)
+	GlobalRoleBindings(schemas, apiContext)
 	RoleTemplate(schemas, apiContext)
 	MultiClusterApps(schemas, apiContext)
 	GlobalDNSs(schemas, apiContext, localClusterEnabled)
@@ -179,6 +185,7 @@ func Setup(ctx context.Context, apiContext *config.ScaledContext, clusterManager
 	ClusterTemplates(schemas, apiContext)
 	ClusterScans(schemas, apiContext, clusterManager)
 	SystemImages(schemas, apiContext)
+	EtcdBackups(schemas, apiContext)
 
 	if err := NodeTypes(schemas, apiContext); err != nil {
 		return err
@@ -231,9 +238,7 @@ func setupScopedTypes(schemas *types.Schemas) {
 
 func Clusters(schemas *types.Schemas, managementContext *config.ScaledContext, clusterManager *clustermanager.Manager, k8sProxy http.Handler) {
 	schema := schemas.Schema(&managementschema.Version, client.ClusterType)
-	clusterFormatter := ccluster.Formatter{
-		KontainerDriverLister: managementContext.Management.KontainerDrivers("").Controller().Lister(),
-	}
+	clusterFormatter := ccluster.NewFormatter(schemas, managementContext)
 	schema.Formatter = clusterFormatter.Formatter
 	schema.CollectionFormatter = clusterFormatter.CollectionFormatter
 	clusterStore := cluster.GetClusterStore(schema, managementContext, clusterManager, k8sProxy)
@@ -359,6 +364,16 @@ func ClusterRegistrationTokens(schemas *types.Schemas) {
 	schema.Formatter = clusterregistrationtokens.Formatter
 }
 
+func Tokens(ctx context.Context, schemas *types.Schemas, mgmt *config.ScaledContext) {
+	schema := schemas.Schema(&managementschema.Version, client.TokenType)
+	manager := tokens.NewManager(ctx, mgmt)
+
+	schema.Store = &transform.Store{
+		Store:             schema.Store,
+		StreamTransformer: manager.TokenStreamTransformer,
+	}
+}
+
 func NodeTemplates(schemas *types.Schemas, management *config.ScaledContext) {
 	schema := schemas.Schema(&managementschema.Version, client.NodeTemplateType)
 	npl := management.Management.NodePools("").Controller().Lister()
@@ -454,6 +469,13 @@ func NodeTypes(schemas *types.Schemas, management *config.ScaledContext) error {
 	schema.LinkHandler = machineHandler.LinkHandler
 	actionWrapper := node.ActionWrapper{}
 	schema.ActionHandler = actionWrapper.ActionHandler
+
+	schema = schemas.Schema(&managementschema.Version, client.NodePoolType)
+	ntl := management.Management.NodeTemplates("").Controller().Lister()
+	f := &nodepool.Formatter{
+		NodeTemplateLister: ntl,
+	}
+	schema.Formatter = f.Formatter
 	return nil
 }
 
@@ -639,6 +661,11 @@ func ProjectRoleTemplateBinding(schemas *types.Schemas, management *config.Scale
 	schema.Validator = roletemplatebinding.NewPRTBValidator(management)
 }
 
+func GlobalRoleBindings(schemas *types.Schemas, management *config.ScaledContext) {
+	schema := schemas.Schema(&managementschema.Version, client.GlobalRoleBindingType)
+	schema.Store = grbstore.Wrap(schema.Store, management.Management.GlobalRoleBindings("").Controller().Lister())
+}
+
 func RoleTemplate(schemas *types.Schemas, management *config.ScaledContext) {
 	rt := roletemplate.Wrapper{
 		RoleTemplateLister: management.Management.RoleTemplates("").Controller().Lister(),
@@ -652,24 +679,27 @@ func RoleTemplate(schemas *types.Schemas, management *config.ScaledContext) {
 func KontainerDriver(schemas *types.Schemas, management *config.ScaledContext) {
 	schema := schemas.Schema(&managementschema.Version, client.KontainerDriverType)
 	metadataHandler := md.MetadataController{
-		SystemImagesLister:        management.Management.RKEK8sSystemImages("").Controller().Lister(),
-		SystemImages:              management.Management.RKEK8sSystemImages(""),
-		ServiceOptionsLister:      management.Management.RKEK8sServiceOptions("").Controller().Lister(),
-		ServiceOptions:            management.Management.RKEK8sServiceOptions(""),
-		AddonsLister:              management.Management.RKEAddons("").Controller().Lister(),
-		Addons:                    management.Management.RKEAddons(""),
-		WindowsSystemImagesLister: management.Management.RKEK8sWindowsSystemImages("").Controller().Lister(),
-		WindowsSystemImages:       management.Management.RKEK8sWindowsSystemImages(""),
+		SystemImagesLister:   management.Management.RKEK8sSystemImages("").Controller().Lister(),
+		SystemImages:         management.Management.RKEK8sSystemImages(""),
+		ServiceOptionsLister: management.Management.RKEK8sServiceOptions("").Controller().Lister(),
+		ServiceOptions:       management.Management.RKEK8sServiceOptions(""),
+		AddonsLister:         management.Management.RKEAddons("").Controller().Lister(),
+		Addons:               management.Management.RKEAddons(""),
 	}
 	handler := kontainerdriver.ActionHandler{
 		KontainerDrivers:      management.Management.KontainerDrivers(""),
 		KontainerDriverLister: management.Management.KontainerDrivers("").Controller().Lister(),
 		MetadataHandler:       metadataHandler,
 	}
+	lh := kontainerdriver.ListHandler{
+		SysImageLister: management.Management.RKEK8sSystemImages("").Controller().Lister(),
+		SysImages:      management.Management.RKEK8sSystemImages(""),
+	}
 	schema.ActionHandler = handler.ActionHandler
 	schema.CollectionFormatter = kontainerdriver.CollectionFormatter
 	schema.Formatter = kontainerdriver.NewFormatter(management)
 	schema.Store = kontainerdriver.NewStore(management, schema.Store)
+	schema.ListHandler = lh.ListHandler
 	kontainerDriverValidator := kontainerdriver.Validator{
 		KontainerDriverLister: management.Management.KontainerDrivers("").Controller().Lister(),
 	}
@@ -778,6 +808,7 @@ func ClusterTemplates(schemas *types.Schemas, management *config.ScaledContext) 
 		NamespaceInterface: management.Core.Namespaces(""),
 	}
 	revisionSchema.Store = clustertemplatestore.WrapStore(revisionSchema.Store, management)
+	revisionSchema.Formatter = wrapper.RevisionFormatter
 	revisionSchema.CollectionFormatter = wrapper.CollectionFormatter
 	revisionSchema.ActionHandler = wrapper.ClusterTemplateRevisionsActionHandler
 }
@@ -799,4 +830,9 @@ func SystemImages(schemas *types.Schemas, management *config.ScaledContext) {
 		Store:              schema.Store,
 		NamespaceInterface: management.Core.Namespaces(""),
 	}
+}
+
+func EtcdBackups(schemas *types.Schemas, management *config.ScaledContext) {
+	schema := schemas.Schema(&managementschema.Version, client.EtcdBackupType)
+	schema.Formatter = etcdbackup.Formatter
 }

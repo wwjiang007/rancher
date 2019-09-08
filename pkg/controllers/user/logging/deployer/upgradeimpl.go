@@ -6,13 +6,14 @@ import (
 	"strings"
 	"time"
 
+	versionutil "github.com/rancher/rancher/pkg/catalog/utils"
 	"github.com/rancher/rancher/pkg/controllers/user/helm/common"
 	loggingconfig "github.com/rancher/rancher/pkg/controllers/user/logging/config"
 	"github.com/rancher/rancher/pkg/project"
-	"github.com/rancher/rancher/pkg/settings"
-	appsv1beta2 "github.com/rancher/types/apis/apps/v1beta2"
+	appsv1 "github.com/rancher/types/apis/apps/v1"
 	v1 "github.com/rancher/types/apis/core/v1"
 	v3 "github.com/rancher/types/apis/management.cattle.io/v3"
+	projectv3 "github.com/rancher/types/apis/project.cattle.io/v3"
 	"github.com/rancher/types/config"
 
 	"github.com/pkg/errors"
@@ -33,7 +34,7 @@ type LoggingService struct {
 	catalogLister  v3.CatalogLister
 	projectLister  v3.ProjectLister
 	templateLister v3.CatalogTemplateLister
-	daemonsets     appsv1beta2.DaemonSetInterface
+	daemonsets     appsv1.DaemonSetInterface
 	secrets        v1.SecretInterface
 	appDeployer    *AppDeployer
 }
@@ -59,12 +60,7 @@ func (l *LoggingService) Init(cluster *config.UserContext) {
 }
 
 func (l *LoggingService) Version() (string, error) {
-	catalogID := settings.SystemLoggingCatalogID.Get()
-	templateVersionID, _, err := common.ParseExternalID(catalogID)
-	if err != nil {
-		return "", fmt.Errorf("get system logging catalog version failed, %v", err)
-	}
-	return templateVersionID, nil
+	return loggingconfig.RancherLoggingInitVersion(), nil
 }
 
 func (l *LoggingService) Upgrade(currentVersion string) (string, error) {
@@ -75,7 +71,12 @@ func (l *LoggingService) Upgrade(currentVersion string) (string, error) {
 		return "", errors.Wrapf(err, "get template %s failed", templateID)
 	}
 
-	newFullVersion := fmt.Sprintf("%s-%s", templateID, template.Spec.DefaultVersion)
+	templateVersion, err := versionutil.LatestAvailableTemplateVersion(template)
+	if err != nil {
+		return "", err
+	}
+
+	newFullVersion := fmt.Sprintf("%s-%s", templateID, templateVersion.Version)
 	if currentVersion == newFullVersion {
 		return currentVersion, nil
 	}
@@ -97,8 +98,6 @@ func (l *LoggingService) Upgrade(currentVersion string) (string, error) {
 	}
 
 	//upgrade old app
-	newVersion := template.Spec.DefaultVersion
-	newCatalogID := loggingconfig.RancherLoggingCatalogID(newVersion)
 	defaultSystemProjects, err := l.projectLister.List(metav1.NamespaceAll, labels.Set(project.SystemProjectLabel).AsSelector())
 	if err != nil {
 		return "", errors.Wrap(err, "list system project failed")
@@ -121,7 +120,7 @@ func (l *LoggingService) Upgrade(currentVersion string) (string, error) {
 		return "", errors.Wrapf(err, "get app %s:%s failed", systemProject.Name, appName)
 	}
 
-	_, systemCatalogName, _, _, _, err := common.SplitExternalID(newCatalogID)
+	_, systemCatalogName, _, _, _, err := common.SplitExternalID(templateVersion.ExternalID)
 	if err != nil {
 		return "", err
 	}
@@ -136,9 +135,12 @@ func (l *LoggingService) Upgrade(currentVersion string) (string, error) {
 	}
 
 	newApp := app.DeepCopy()
-	newApp.Spec.ExternalID = newCatalogID
+	newApp.Spec.ExternalID = templateVersion.ExternalID
 
 	if !reflect.DeepEqual(newApp, app) {
+		// add force upgrade to handle chart compatibility in different version
+		projectv3.AppConditionForceUpgrade.Unknown(newApp)
+
 		if _, err = l.appDeployer.AppsGetter.Apps(metav1.NamespaceAll).Update(newApp); err != nil {
 			return "", errors.Wrapf(err, "update app %s:%s failed", app.Namespace, app.Name)
 		}

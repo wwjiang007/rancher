@@ -12,7 +12,7 @@ import time
 def test_node_fields(admin_mc):
     cclient = admin_mc.client
     fields = {
-        'annotations': 'r',
+        'annotations': 'cru',
         'labels': 'cru',
         'nodeTaints': 'r',
         'namespaceId': 'cr',
@@ -152,9 +152,9 @@ def test_writing_config_to_disk(admin_mc, wait_remove_resource):
         clusterId="local")
     wait_remove_resource(node_pool)
 
-    file_name = string_to_encoding(userdata)
+    dir_name = string_to_encoding(userdata)
 
-    full_path = os.path.join(tempdir, file_name)
+    full_path = os.path.join(tempdir, dir_name, 'userdata')
 
     def file_exists():
         try:

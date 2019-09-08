@@ -6,14 +6,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sirupsen/logrus"
+
 	"github.com/rancher/rke/cluster"
 	"github.com/rancher/rke/dind"
 	"github.com/rancher/rke/hosts"
 	"github.com/rancher/rke/log"
 	"github.com/rancher/rke/pki"
-	"github.com/rancher/types/apis/management.cattle.io/v3"
+	"github.com/rancher/rke/pki/cert"
+	v3 "github.com/rancher/types/apis/management.cattle.io/v3"
 	"github.com/urfave/cli"
-	"k8s.io/client-go/util/cert"
 )
 
 const DINDWaitTime = 3
@@ -205,6 +207,7 @@ func checkAllIncluded(cluster *cluster.Cluster) error {
 }
 
 func clusterUpFromCli(ctx *cli.Context) error {
+	logrus.Infof("Running RKE version: %v", ctx.App.Version)
 	if ctx.Bool("local") {
 		return clusterUpLocal(ctx)
 	}

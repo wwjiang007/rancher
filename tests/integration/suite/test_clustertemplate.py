@@ -51,7 +51,8 @@ def test_create_template_revision_k8s_translation(admin_mc, remove_resource):
                   "default": "/var/lib/docker"
                  }]
     with pytest.raises(ApiError) as e:
-        client.create_cluster_template_revision(clusterConfig=cconfig,
+        client.create_cluster_template_revision(name=random_str(),
+                                                clusterConfig=cconfig,
                                                 clusterTemplateId=tId,
                                                 questions=questions,
                                                 enabled="true")
@@ -77,7 +78,8 @@ def test_default_pod_sec(admin_mc, remove_resource):
         },
         "defaultPodSecurityPolicyTemplateId": "restricted",
     }
-    rev = client.create_cluster_template_revision(clusterConfig=cconfig,
+    rev = client.create_cluster_template_revision(name=random_str(),
+                                                  clusterConfig=cconfig,
                                                   clusterTemplateId=tId,
                                                   enabled="true")
 
@@ -211,7 +213,8 @@ def test_create_cluster_template_with_members(admin_mc, remove_resource,
 
     # add * as member to share with all
     new_members = [{"userPrincipalId": "local://" + user_member.user.id,
-                    "accessType": "read-only"}, {"groupPrincipalId": "*"}]
+                    "accessType": "read-only"}, {"groupPrincipalId": "*",
+                                                 "accessType": "read-only"}]
     client.update(ct, members=new_members)
 
     split = cluster_template.id.split(":")
@@ -280,7 +283,7 @@ def test_check_enforcement(admin_mc, remove_resource, user_factory):
 
     # a user can create an rke cluster with a public template
     template_reloaded = client.by_id_cluster_template(templateId)
-    new_members = [{"groupPrincipalId": "*"}]
+    new_members = [{"groupPrincipalId": "*", "accessType": "read-only"}]
     client.update(template_reloaded, members=new_members)
 
     cluster2 = user_client.create_cluster(name=random_str(),
@@ -294,11 +297,11 @@ def test_check_enforcement(admin_mc, remove_resource, user_factory):
 def test_revision_creation_permission(admin_mc, remove_resource,
                                       user_factory):
     user_readonly = user_factory()
-    user_member = user_factory()
+    user_owner = user_factory()
     members = [{"userPrincipalId": "local://" + user_readonly.user.id,
                 "accessType": "read-only"},
-               {"userPrincipalId": "local://" + user_member.user.id,
-                "accessType": "member"}]
+               {"userPrincipalId": "local://" + user_owner.user.id,
+                "accessType": "owner"}]
     cluster_template = create_cluster_template(admin_mc, remove_resource,
                                                members, admin_mc)
     rbac = kubernetes.client.RbacAuthorizationV1Api(admin_mc.k8s_client)
@@ -309,31 +312,22 @@ def test_revision_creation_permission(admin_mc, remove_resource,
                                          user_readonly.user.id, rb_name),
              timeout=60,
              fail_handler=fail_handler(rb_resource))
-    rb_name = name + "-ct-u"
+    rb_name = name + "-ct-a"
     wait_for(lambda: check_subject_in_rb(rbac, 'cattle-global-data',
-                                         user_member.user.id, rb_name),
+                                         user_owner.user.id, rb_name),
              timeout=60,
              fail_handler=fail_handler(rb_resource))
     templateId = cluster_template.id
-    # user with accessType=member should not be able to create revision
-    # since user does not have 'clustertemplates-create' role
-    try:
-        create_cluster_template_revision(user_member.client, templateId)
-    except ApiError as e:
-        assert e.error.status == 403
+    # user with accessType=owner should be able to create revision
+    # since a standard user can add revisions to template shared
+    # with owner access
+
+    create_cluster_template_revision(user_owner.client, templateId)
 
     # user with read-only accessType should get Forbidden error
-    try:
+    with pytest.raises(ApiError) as e:
         create_cluster_template_revision(user_readonly.client, templateId)
-    except ApiError as e:
         assert e.error.status == 403
-
-    # assign 'clustertemplates-create' role to the user with accessType=member
-    # can create revision now
-    grb = admin_mc.client.create_global_role_binding(
-        userId=user_member.user.id, globalRoleId='clustertemplates-create')
-    wait_until(grb_cb(admin_mc.client, grb))
-    _ = create_cluster_template_revision(user_member.client, templateId)
 
 
 def test_updated_members_revision_access(admin_mc, remove_resource,
@@ -348,14 +342,14 @@ def test_updated_members_revision_access(admin_mc, remove_resource,
     # update template to add a user as member
     user_member = user_factory()
     members = [{"userPrincipalId": "local://" + user_member.user.id,
-                "accessType": "member"}]
+                "accessType": "read-only"}]
     admin_mc.client.update(cluster_template, members=members)
 
     # this member should get access to existing revision "rev"
     rbac = kubernetes.client.RbacAuthorizationV1Api(admin_mc.k8s_client)
     split = rev.id.split(":")
     name = split[1]
-    rb_name = name + "-ctr-u"
+    rb_name = name + "-ctr-r"
     wait_for(lambda: check_subject_in_rb(rbac, 'cattle-global-data',
                                          user_member.user.id, rb_name),
              timeout=60,
@@ -375,10 +369,10 @@ def test_updated_members_revision_access(admin_mc, remove_resource,
 
 def test_permissions_removed_on_downgrading_access(admin_mc, remove_resource,
                                                    user_factory):
-    user_member = user_factory()
-    remove_resource(user_member)
-    members = [{"userPrincipalId": "local://" + user_member.user.id,
-                "accessType": "member"}]
+    user_owner = user_factory()
+    remove_resource(user_owner)
+    members = [{"userPrincipalId": "local://" + user_owner.user.id,
+                "accessType": "owner"}]
     # create cluster template with one member having "member" accessType
     cluster_template = create_cluster_template(admin_mc, remove_resource,
                                                members, admin_mc)
@@ -386,40 +380,40 @@ def test_permissions_removed_on_downgrading_access(admin_mc, remove_resource,
     rbac = kubernetes.client.RbacAuthorizationV1Api(admin_mc.k8s_client)
     split = cluster_template.id.split(":")
     name = split[1]
-    rb_name = name + "-ct-u"
+    rb_name = name + "-ct-a"
     wait_for(lambda: check_subject_in_rb(rbac, 'cattle-global-data',
-                                         user_member.user.id, rb_name),
+                                         user_owner.user.id, rb_name),
              timeout=60,
              fail_handler=fail_handler(rb_resource))
 
-    # user with accessType=member should be able to update template
+    # user with accessType=owner should be able to update template
     # so adding new member by the user_member should be allowed
     new_member = user_factory()
     remove_resource(new_member)
-    members = [{"userPrincipalId": "local://" + user_member.user.id,
-                "accessType": "member"},
+    members = [{"userPrincipalId": "local://" + user_owner.user.id,
+                "accessType": "owner"},
                {"userPrincipalId": "local://" + new_member.user.id,
                 "accessType": "read-only"}]
-    user_member.client.update(cluster_template, members=members)
+    user_owner.client.update(cluster_template, members=members)
 
-    # now change user_member's accessType to read-only
-    members = [{"userPrincipalId": "local://" + user_member.user.id,
+    # now change user_owner's accessType to read-only
+    members = [{"userPrincipalId": "local://" + user_owner.user.id,
                 "accessType": "read-only"},
                {"userPrincipalId": "local://" + new_member.user.id,
                 "accessType": "read-only"}]
     admin_mc.client.update(cluster_template, members=members)
     rb_name = name + "-ct-r"
     wait_for(lambda: check_subject_in_rb(rbac, 'cattle-global-data',
-                                         user_member.user.id, rb_name),
+                                         user_owner.user.id, rb_name),
              timeout=60,
              fail_handler=fail_handler(rb_resource))
 
-    # user_member should not be allowed to update cluster template now
+    # user_owner should not be allowed to update cluster template now
     # test updating members field by removing new_member
-    members = [{"userPrincipalId": "local://" + user_member.user.id,
+    members = [{"userPrincipalId": "local://" + user_owner.user.id,
                 "accessType": "read-only"}]
     try:
-        user_member.client.update(cluster_template, members=members)
+        user_owner.client.update(cluster_template, members=members)
     except ApiError as e:
         assert e.error.status == 403
 
@@ -458,7 +452,8 @@ def test_required_template_question(admin_mc, remove_resource):
                   "default": "true"
                  }]
 
-    rev = client.create_cluster_template_revision(clusterConfig=cconfig,
+    rev = client.create_cluster_template_revision(name=random_str(),
+                                                  clusterConfig=cconfig,
                                                   clusterTemplateId=tId,
                                                   questions=questions,
                                                   enabled="true")
@@ -477,6 +472,189 @@ def test_required_template_question(admin_mc, remove_resource):
                               description="template from cluster",
                               answers=answers)
         assert e.value.error.status == 422
+
+
+def test_secret_template_answers(admin_mc, remove_resource):
+    cluster_template = create_cluster_template(admin_mc,
+                                               remove_resource, [], admin_mc)
+    tId = cluster_template.id
+    client = admin_mc.client
+
+    cconfig = {
+        "rancherKubernetesEngineConfig": {
+            "services": {
+                "type": "rkeConfigServices",
+                "kubeApi": {
+                    "alwaysPullImages": "false",
+                    "podSecurityPolicy": "false",
+                    "serviceNodePortRange": "30000-32767",
+                    "type": "kubeAPIService"
+                }
+            }
+        },
+        "defaultPodSecurityPolicyTemplateId": "restricted",
+    }
+    azureClientId = "rancherKubernetesEngineConfig.cloudProvider.\
+azureCloudProvider.aadClientId"
+    azureClientSecret = "rancherKubernetesEngineConfig.cloudProvider.\
+azureCloudProvider.aadClientSecret"
+
+    questions = [{
+                  "variable": "dockerRootDir",
+                  "required": "true",
+                  "type": "string",
+                  "default": ""
+                 },
+                 {
+                  "variable": azureClientId,
+                  "required": "true",
+                  "type": "string",
+                  "default": "abcdClientId"
+                 },
+                 {
+                  "variable": azureClientSecret,
+                  "required": "true",
+                  "type": "string",
+                  "default": ""
+                 }]
+
+    rev = client.create_cluster_template_revision(name=random_str(),
+                                                  clusterConfig=cconfig,
+                                                  clusterTemplateId=tId,
+                                                  questions=questions,
+                                                  enabled="true")
+
+    # creating a cluster with this template
+    answers = {
+                "values": {
+                    "dockerRootDir": "/var/lib/docker123",
+                    azureClientId: "abcdClientId",
+                    azureClientSecret: "abcdClientSecret"
+                }
+              }
+
+    cluster = client.create_cluster(name=random_str(),
+                                    clusterTemplateRevisionId=rev.id,
+                                    description="template from cluster",
+                                    answers=answers)
+    remove_resource(cluster)
+    assert cluster.conditions[0].type == 'Pending'
+    assert cluster.conditions[0].status == 'True'
+    assert cluster.answers.values[azureClientId] is not None
+    assert azureClientSecret not in cluster.answers.values
+    client.delete(cluster)
+    wait_for_cluster_to_be_deleted(client, cluster.id)
+
+
+def test_member_accesstype_check(admin_mc, user_factory, remove_resource):
+    client = admin_mc.client
+    user_readonly = user_factory()
+    user_owner = user_factory()
+    members = [{"userPrincipalId": "local://" + user_readonly.user.id,
+                "accessType": "read-only"},
+               {"userPrincipalId": "local://" + user_owner.user.id,
+                "accessType": "member"}]
+    # creation with a member with accessType "member" shouldn't be allowed
+    try:
+        create_cluster_template(admin_mc, remove_resource,
+                                members, admin_mc)
+    except ApiError as e:
+        assert e.error.status == 422
+
+    members = [{"userPrincipalId": "local://" + user_readonly.user.id,
+                "accessType": "read-only"},
+               {"userPrincipalId": "local://" + user_owner.user.id,
+                "accessType": "owner"}]
+    cluster_template = create_cluster_template(admin_mc, remove_resource,
+                                               members, admin_mc)
+
+    updated_members = \
+        [{"userPrincipalId": "local://" + user_readonly.user.id,
+         "accessType": "read-only"},
+         {"userPrincipalId": "local://" + user_owner.user.id,
+         "accessType": "member"}]
+    # updating a cluster template to add user with access type "member"
+    # shouldn't be allowed
+    try:
+        client.update(cluster_template, members=updated_members)
+    except ApiError as e:
+        assert e.error.status == 422
+
+
+def test_create_cluster_with_invalid_revision(admin_mc, remove_resource):
+    cluster_template = create_cluster_template(admin_mc,
+                                               remove_resource, [], admin_mc)
+    tId = cluster_template.id
+    client = admin_mc.client
+
+    # templaterevision with question with invalid format
+    cconfig = {
+        "rancherKubernetesEngineConfig": {
+            "services": {
+                "type": "rkeConfigServices",
+                "kubeApi": {
+                    "alwaysPullImages": "false",
+                    "podSecurityPolicy": "false",
+                    "serviceNodePortRange": "30000-32767",
+                    "type": "kubeAPIService"
+                }
+            }
+        },
+        "defaultPodSecurityPolicyTemplateId": "restricted",
+    }
+    questions = [{
+                  "variable": "dockerRootDir",
+                  "required": "true",
+                  "type": "string",
+                  "default": ""
+                 },
+                 {
+                 "default": "map[enabled:true type:localClusterAuthEndpoint]",
+                 "required": "false",
+                 "type": "string",
+                 "variable": "localClusterAuthEndpoint"
+                 }]
+
+    rev = client.create_cluster_template_revision(name=random_str(),
+                                                  clusterConfig=cconfig,
+                                                  clusterTemplateId=tId,
+                                                  questions=questions,
+                                                  enabled="true")
+
+    # creating a cluster with this template
+    with pytest.raises(ApiError) as e:
+        client.create_cluster(name=random_str(),
+                              clusterTemplateRevisionId=rev.id,
+                              description="template from cluster")
+        assert e.value.error.status == 422
+
+
+def test_disable_template_revision(admin_mc, remove_resource):
+    cluster_template = create_cluster_template(admin_mc,
+                                               remove_resource, [], admin_mc)
+    tId = cluster_template.id
+    client = admin_mc.client
+    rev = \
+        create_cluster_template_revision(admin_mc.client, tId)
+
+    # creating a cluster with this template
+    cluster = client.create_cluster(name=random_str(),
+                                    clusterTemplateRevisionId=rev.id,
+                                    description="template from cluster")
+    remove_resource(cluster)
+    assert cluster.conditions[0].type == 'Pending'
+    assert cluster.conditions[0].status == 'True'
+
+    # disable the revision
+    client.action(obj=rev, action_name="disable")
+
+    with pytest.raises(ApiError) as e:
+        client.create_cluster(name=random_str(),
+                              clusterTemplateRevisionId=rev.id)
+        assert e.value.error.status == 500
+
+    client.delete(cluster)
+    wait_for_cluster_to_be_deleted(client, cluster.id)
 
 
 def rtb_cb(client, rtb):
@@ -551,8 +729,11 @@ def create_cluster_template_revision(client, clusterTemplateId):
                   "default": "1.13.x"
                  }]
 
+    revision_name = random_str()
+
     cluster_template_revision = \
         client.create_cluster_template_revision(
+                                        name=revision_name,
                                         clusterConfig=cluster_config,
                                         clusterTemplateId=clusterTemplateId,
                                         disabled="false",

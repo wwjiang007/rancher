@@ -1,5 +1,3 @@
-// +build !windows
-
 package main
 
 import (
@@ -17,12 +15,13 @@ import (
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/client"
-	"github.com/rancher/norman/pkg/remotedialer"
+	"github.com/mattn/go-colorable"
 	"github.com/rancher/rancher/pkg/agent/clean"
 	"github.com/rancher/rancher/pkg/agent/cluster"
 	"github.com/rancher/rancher/pkg/agent/node"
 	"github.com/rancher/rancher/pkg/logserver"
 	"github.com/rancher/rancher/pkg/rkenodeconfigclient"
+	"github.com/rancher/remotedialer"
 	"github.com/sirupsen/logrus"
 )
 
@@ -36,6 +35,7 @@ const (
 )
 
 func main() {
+	logrus.SetOutput(colorable.NewColorableStdout())
 	logserver.StartServerWithDefaults()
 	if os.Getenv("CATTLE_DEBUG") == "true" || os.Getenv("RANCHER_DEBUG") == "true" {
 		logrus.SetLevel(logrus.DebugLevel)
@@ -205,12 +205,14 @@ func run() error {
 			wsURL += "/register"
 		}
 		logrus.Infof("Connecting to %s with token %s", wsURL, token)
-		remotedialer.ClientConnect(wsURL, http.Header(headers), nil, func(proto, address string) bool {
+		remotedialer.ClientConnect(context.Background(), wsURL, http.Header(headers), nil, func(proto, address string) bool {
 			switch proto {
 			case "tcp":
 				return true
 			case "unix":
 				return address == "/var/run/docker.sock"
+			case "npipe":
+				return address == "//./pipe/docker_engine"
 			}
 			return false
 		}, onConnect)

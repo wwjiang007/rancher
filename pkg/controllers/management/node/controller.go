@@ -17,6 +17,7 @@ import (
 	"github.com/rancher/norman/types/convert"
 	"github.com/rancher/norman/types/values"
 	"github.com/rancher/rancher/pkg/api/customization/clusterregistrationtokens"
+	"github.com/rancher/rancher/pkg/controllers/management/drivers/nodedriver"
 	"github.com/rancher/rancher/pkg/encryptedstore"
 	"github.com/rancher/rancher/pkg/jailer"
 	"github.com/rancher/rancher/pkg/namespace"
@@ -72,6 +73,7 @@ func Register(ctx context.Context, management *config.ManagementContext) {
 		secretStore:               secretStore,
 		nodeClient:                nodeClient,
 		nodeTemplateClient:        management.Management.NodeTemplates(""),
+		nodePoolLister:            management.Management.NodePools("").Controller().Lister(),
 		nodeTemplateGenericClient: management.Management.NodeTemplates("").ObjectClient().UnstructuredClient(),
 		configMapGetter:           management.K8sClient.CoreV1(),
 		clusterLister:             management.Management.Clusters("").Controller().Lister(),
@@ -89,6 +91,7 @@ type Lifecycle struct {
 	nodeTemplateGenericClient objectclient.GenericClient
 	nodeClient                v3.NodeInterface
 	nodeTemplateClient        v3.NodeTemplateInterface
+	nodePoolLister            v3.NodePoolLister
 	configMapGetter           typedv1.ConfigMapsGetter
 	clusterLister             v3.ClusterLister
 	schemaLister              v3.DynamicSchemaLister
@@ -121,9 +124,6 @@ func (m *Lifecycle) setupCustom(obj *v3.Node) {
 			Address: obj.Status.NodeConfig.Address,
 		},
 	}
-
-	obj.Spec.DesiredNodeTaints = taints.GetTaintsFromStrings(obj.Spec.CustomConfig.Taints)
-	obj.Spec.UpdateTaintsFromAPI = &falseValue
 }
 
 func isCustom(obj *v3.Node) bool {
@@ -208,6 +208,11 @@ func (m *Lifecycle) Create(obj *v3.Node) (runtime.Object, error) {
 func (m *Lifecycle) getNodeTemplate(nodeTemplateName string) (*v3.NodeTemplate, error) {
 	ns, n := ref.Parse(nodeTemplateName)
 	return m.nodeTemplateClient.GetNamespaced(ns, n, metav1.GetOptions{})
+}
+
+func (m *Lifecycle) getNodePool(nodePoolName string) (*v3.NodePool, error) {
+	ns, p := ref.Parse(nodePoolName)
+	return m.nodePoolLister.Get(ns, p)
 }
 
 func (m *Lifecycle) Remove(obj *v3.Node) (runtime.Object, error) {
@@ -329,8 +334,26 @@ func aliasToPath(driver string, config map[string]interface{}, ns string) error 
 				hasher.Reset()
 				hasher.Write([]byte(fileContents))
 				sha := base32.StdEncoding.WithPadding(-1).EncodeToString(hasher.Sum(nil))[:10]
-				fullPath := path.Join(baseDir, sha)
-				err := ioutil.WriteFile(fullPath, []byte(fileContents), 0600)
+				fileName := driverField
+				if ok := nodedriver.SSHKeyFields[schemaField]; ok {
+					fileName = "id_rsa"
+				}
+
+				fileDir := path.Join(baseDir, sha)
+
+				// Delete the fileDir path if it's not a directory
+				if info, err := os.Stat(fileDir); err == nil && !info.IsDir() {
+					if err := os.Remove(fileDir); err != nil {
+						return err
+					}
+				}
+
+				err := os.MkdirAll(fileDir, 0755)
+				if err != nil {
+					return err
+				}
+				fullPath := path.Join(fileDir, fileName)
+				err = ioutil.WriteFile(fullPath, []byte(fileContents), 0600)
 				if err != nil {
 					return err
 				}
@@ -338,7 +361,7 @@ func aliasToPath(driver string, config map[string]interface{}, ns string) error 
 				if devMode {
 					config[driverField] = fullPath
 				} else {
-					config[driverField] = path.Join("/", sha)
+					config[driverField] = path.Join("/", sha, fileName)
 				}
 			}
 		}
@@ -480,6 +503,11 @@ func (m *Lifecycle) saveConfig(config *nodeconfig.NodeConfig, nodeDir string, ob
 		return obj, err
 	}
 
+	pool, err := m.getNodePool(obj.Spec.NodePoolName)
+	if err != nil {
+		return obj, err
+	}
+
 	obj.Status.NodeConfig = &v3.RKEConfigNode{
 		NodeName:         obj.Namespace + ":" + obj.Name,
 		Address:          ip,
@@ -502,16 +530,17 @@ func (m *Lifecycle) saveConfig(config *nodeconfig.NodeConfig, nodeDir string, ob
 	}
 
 	templateSet := taints.GetKeyEffectTaintSet(template.Spec.NodeTaints)
-	nodeSet := taints.GetKeyEffectTaintSet(obj.Spec.DesiredNodeTaints)
+	nodeSet := taints.GetKeyEffectTaintSet(pool.Spec.NodeTaints)
+	expectTaints := pool.Spec.NodeTaints
 
 	for key, ti := range templateSet {
-		// the desired node taints is set by the node pool already. so we don't need to set it by template because
+		// the expect taints are based on the node pool. so we don't need to set taints with same key and effect by template because
 		// the taints from node pool should override the taints from template.
 		if _, ok := nodeSet[key]; !ok {
-			obj.Spec.DesiredNodeTaints = append(obj.Spec.DesiredNodeTaints, template.Spec.NodeTaints[ti])
-			obj.Spec.UpdateTaintsFromAPI = &falseValue
+			expectTaints = append(expectTaints, template.Spec.NodeTaints[ti])
 		}
 	}
+	obj.Status.NodeConfig.Taints = taints.GetRKETaintsFromTaints(expectTaints)
 
 	return obj, nil
 }

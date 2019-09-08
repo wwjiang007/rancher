@@ -1,9 +1,11 @@
 import platform
 import pytest
 import sys
+import requests
 from rancher import ApiError
 
-from .conftest import wait_for_condition, wait_until, random_str, wait_for
+from .conftest import wait_for_condition, wait_until, random_str, \
+                    wait_for, BASE_URL
 
 NEW_DRIVER_URL = "https://github.com/rancher/kontainer-engine-driver-" \
                  "example/releases/download/v0.2.2/kontainer-engine-" \
@@ -269,6 +271,44 @@ def test_update_duplicate_driver_conflict(admin_mc, wait_remove_resource):
     except ApiError as e:
         assert e.error.status == 409
         assert "Driver URL already in use:" in e.error.message
+
+
+def test_kontainer_driver_links(admin_mc):
+    client = admin_mc.client
+    lister = client.list_kontainerDriver()
+    assert 'rancher-images' in lister.links
+    assert 'rancher-windows-images' in lister.links
+    token = 'Bearer '+client.token
+    url = BASE_URL + "/kontainerdrivers/rancher-images"
+    images = get_images(url, token)
+    assert "hyperkube" in images
+    assert "rke-tools" in images
+    assert "kubelet-pause" not in images
+    # test windows link
+    url = BASE_URL + "/kontainerdrivers/rancher-windows-images"
+    images = get_images(url, token)
+    assert "hyperkube" in images
+    assert "rke-tools" in images
+    assert "kubelet-pause" in images
+
+
+def get_images(url, token):
+    data = requests.get(
+        url=url,
+        verify=False,
+        headers={'Accept': '*/*', 'Authorization': token})
+    assert data is not None
+    content = data.content.splitlines()
+    assert len(content) > 0
+    test = {}
+    for line in content:
+        if "rancher/hyperkube" in str(line):
+            test["hyperkube"] = True
+        elif "rancher/rke-tools" in str(line):
+            test["rke-tools"] = True
+        elif "rancher/kubelet-pause" in str(line):
+            test["kubelet-pause"] = True
+    return test
 
 
 def verify_driver_in_types(client, kd):

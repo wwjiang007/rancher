@@ -6,11 +6,10 @@ import (
 	"github.com/rancher/norman/controller"
 	"github.com/rancher/norman/objectclient/dynamic"
 	"github.com/rancher/norman/restwatch"
-	"github.com/rancher/norman/signal"
 	"github.com/rancher/norman/store/proxy"
 	"github.com/rancher/norman/types"
 	apiregistrationv1 "github.com/rancher/types/apis/apiregistration.k8s.io/v1"
-	appsv1beta2 "github.com/rancher/types/apis/apps/v1beta2"
+	appsv1 "github.com/rancher/types/apis/apps/v1"
 	autoscaling "github.com/rancher/types/apis/autoscaling/v2beta2"
 	batchv1 "github.com/rancher/types/apis/batch/v1"
 	batchv1beta1 "github.com/rancher/types/apis/batch/v1beta1"
@@ -23,6 +22,7 @@ import (
 	monitoringv1 "github.com/rancher/types/apis/monitoring.coreos.com/v1"
 	istiov1alpha3 "github.com/rancher/types/apis/networking.istio.io/v1alpha3"
 	knetworkingv1 "github.com/rancher/types/apis/networking.k8s.io/v1"
+	policyv1beta1 "github.com/rancher/types/apis/policy/v1beta1"
 	projectv3 "github.com/rancher/types/apis/project.cattle.io/v3"
 	projectSchema "github.com/rancher/types/apis/project.cattle.io/v3/schema"
 	rbacv1 "github.com/rancher/types/apis/rbac.authorization.k8s.io/v1"
@@ -182,7 +182,7 @@ type UserContext struct {
 	K8sClient         kubernetes.Interface
 
 	APIAggregation apiregistrationv1.Interface
-	Apps           appsv1beta2.Interface
+	Apps           appsv1.Interface
 	Autoscaling    autoscaling.Interface
 	Project        projectv3.Interface
 	Core           corev1.Interface
@@ -195,6 +195,7 @@ type UserContext struct {
 	Cluster        clusterv3.Interface
 	Istio          istiov1alpha3.Interface
 	Storage        storagev1.Interface
+	Policy         policyv1beta1.Interface
 }
 
 func (w *UserContext) controllers() []controller.Starter {
@@ -211,6 +212,7 @@ func (w *UserContext) controllers() []controller.Starter {
 		w.Monitoring,
 		w.Cluster,
 		w.Storage,
+		w.Policy,
 	}
 }
 
@@ -234,6 +236,7 @@ func (w *UserContext) UserOnlyContext() *UserOnlyContext {
 		Cluster:      w.Cluster,
 		Istio:        w.Istio,
 		Storage:      w.Storage,
+		Policy:       w.Policy,
 	}
 }
 
@@ -245,7 +248,7 @@ type UserOnlyContext struct {
 	K8sClient         kubernetes.Interface
 
 	APIRegistration apiregistrationv1.Interface
-	Apps            appsv1beta2.Interface
+	Apps            appsv1.Interface
 	Autoscaling     autoscaling.Interface
 	Project         projectv3.Interface
 	Core            corev1.Interface
@@ -257,6 +260,7 @@ type UserOnlyContext struct {
 	Cluster         clusterv3.Interface
 	Istio           istiov1alpha3.Interface
 	Storage         storagev1.Interface
+	Policy          policyv1beta1.Interface
 }
 
 func (w *UserOnlyContext) controllers() []controller.Starter {
@@ -271,6 +275,7 @@ func (w *UserOnlyContext) controllers() []controller.Starter {
 		w.BatchV1Beta1,
 		w.Monitoring,
 		w.Storage,
+		w.Policy,
 	}
 }
 
@@ -348,13 +353,6 @@ func (c *ManagementContext) Start(ctx context.Context) error {
 	return controller.SyncThenStart(ctx, 50, c.controllers()...)
 }
 
-func (c *ManagementContext) StartAndWait() error {
-	ctx := signal.SigTermCancelContext(context.Background())
-	c.Start(ctx)
-	<-ctx.Done()
-	return ctx.Err()
-}
-
 func NewUserContext(scaledContext *ScaledContext, config rest.Config, clusterName string) (*UserContext, error) {
 	var err error
 	context := &UserContext{
@@ -372,7 +370,7 @@ func NewUserContext(scaledContext *ScaledContext, config rest.Config, clusterNam
 		return nil, err
 	}
 
-	context.Apps, err = appsv1beta2.NewForConfig(config)
+	context.Apps, err = appsv1.NewForConfig(config)
 	if err != nil {
 		return nil, err
 	}
@@ -403,6 +401,11 @@ func NewUserContext(scaledContext *ScaledContext, config rest.Config, clusterNam
 	}
 
 	context.Extensions, err = extv1beta1.NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+
+	context.Policy, err = policyv1beta1.NewForConfig(config)
 	if err != nil {
 		return nil, err
 	}
@@ -467,13 +470,6 @@ func (w *UserContext) Start(ctx context.Context) error {
 	return controller.SyncThenStart(ctx, 5, controllers...)
 }
 
-func (w *UserContext) StartAndWait(ctx context.Context) error {
-	ctx = signal.SigTermCancelContext(ctx)
-	w.Start(ctx)
-	<-ctx.Done()
-	return ctx.Err()
-}
-
 func NewUserOnlyContext(config rest.Config) (*UserOnlyContext, error) {
 	var err error
 	context := &UserOnlyContext{
@@ -485,7 +481,7 @@ func NewUserOnlyContext(config rest.Config) (*UserOnlyContext, error) {
 		return nil, err
 	}
 
-	context.Apps, err = appsv1beta2.NewForConfig(config)
+	context.Apps, err = appsv1.NewForConfig(config)
 	if err != nil {
 		return nil, err
 	}
@@ -511,6 +507,11 @@ func NewUserOnlyContext(config rest.Config) (*UserOnlyContext, error) {
 	}
 
 	context.Extensions, err = extv1beta1.NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+
+	context.Policy, err = policyv1beta1.NewForConfig(config)
 	if err != nil {
 		return nil, err
 	}
@@ -571,11 +572,4 @@ func NewUserOnlyContext(config rest.Config) (*UserOnlyContext, error) {
 func (w *UserOnlyContext) Start(ctx context.Context) error {
 	logrus.Info("Starting workload controllers")
 	return controller.SyncThenStart(ctx, 5, w.controllers()...)
-}
-
-func (w *UserOnlyContext) StartAndWait(ctx context.Context) error {
-	ctx = signal.SigTermCancelContext(ctx)
-	w.Start(ctx)
-	<-ctx.Done()
-	return ctx.Err()
 }

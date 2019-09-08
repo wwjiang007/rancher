@@ -1,6 +1,9 @@
 package kontainerdriver
 
 import (
+	"fmt"
+	"strings"
+
 	"github.com/rancher/norman/types"
 	v3 "github.com/rancher/types/apis/management.cattle.io/v3"
 	client "github.com/rancher/types/client/management/v3"
@@ -28,6 +31,12 @@ func NewFormatter(manangement *config.ScaledContext) types.Formatter {
 
 func CollectionFormatter(apiContext *types.APIContext, collection *types.GenericCollection) {
 	collection.AddAction(apiContext, "refresh")
+	currContext := apiContext.URLBuilder.Current()
+	if !strings.HasSuffix(currContext, "/") {
+		currContext = fmt.Sprintf("%s/", currContext)
+	}
+	collection.Links["rancher-images"] = fmt.Sprintf("%srancher-images", currContext)
+	collection.Links["rancher-windows-images"] = fmt.Sprintf("%srancher-windows-images", currContext)
 }
 
 const clusterByGenericEngineConfigKey = "genericEngineConfig"

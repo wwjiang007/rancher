@@ -24,7 +24,14 @@ spec:
                   operator: NotIn
                   values:
                     - windows
+                - key: node-role.kubernetes.io/worker
+                  operator: Exists
       serviceAccountName: kube-dns-autoscaler
+      tolerations:
+      - effect: NoExecute
+        operator: Exists
+      - effect: NoSchedule
+        operator: Exists
       containers:
       - name: autoscaler
         image: {{.KubeDNSAutoScalerImage}}
@@ -122,10 +129,12 @@ spec:
       annotations:
         scheduler.alpha.kubernetes.io/critical-pod: ''
     spec:
+{{if .NodeSelector}}
       nodeSelector:
       {{ range $k, $v := .NodeSelector }}
         {{ $k }}: "{{ $v }}"
       {{ end }}
+{{end}}
       affinity:
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
@@ -145,9 +154,15 @@ spec:
                   operator: NotIn
                   values:
                     - windows
+                - key: node-role.kubernetes.io/worker
+                  operator: Exists
       tolerations:
       - key: "CriticalAddonsOnly"
         operator: "Exists"
+      - effect: NoExecute
+        operator: Exists
+      - effect: NoSchedule
+        operator: Exists
       volumes:
       - name: kube-dns-config
         configMap:
