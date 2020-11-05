@@ -1,6 +1,6 @@
 # Rancher
 
-[![Build Status](https://drone8.rancher.io/api/badges/rancher/rancher/status.svg?branch=master)](https://drone8.rancher.io/rancher/rancher)
+[![Build Status](https://drone-publish.rancher.io/api/badges/rancher/rancher/status.svg?branch=master)](https://drone-publish.rancher.io/rancher/rancher)
 [![Docker Pulls](https://img.shields.io/docker/pulls/rancher/rancher.svg)](https://store.docker.com/community/images/rancher/rancher)
 [![Go Report Card](https://goreportcard.com/badge/github.com/rancher/rancher)](https://goreportcard.com/report/github.com/rancher/rancher)
 
@@ -10,15 +10,15 @@ Rancher is an open source project that provides a container management platform 
 
 ## Latest Release
 
-* Latest - v2.2.7 - `rancher/rancher:latest` - Read the full release [notes](https://github.com/rancher/rancher/releases/tag/v2.2.7).
+* Latest - v2.5.1 - `rancher/rancher:latest` - Read the full release [notes](https://github.com/rancher/rancher/releases/tag/v2.5.1).
 
-* Stable - v2.2.7 - `rancher/rancher:stable` - Read the full release [notes](https://github.com/rancher/rancher/releases/tag/v2.2.7).
+* Stable - v2.4.5 - `rancher/rancher:stable` - Read the full release [notes](https://github.com/rancher/rancher/releases/tag/v2.4.5).
 
 To get automated notifications of our latest release, you can watch the announcements category in our [forums](http://forums.rancher.com/c/announcements), or subscribe to the RSS feed `https://forums.rancher.com/c/announcements.rss`.
 
 ## Quick Start
 
-    sudo docker run -d --restart=unless-stopped -p 80:80 -p 443:443 rancher/rancher
+    sudo docker run -d --restart=unless-stopped -p 80:80 -p 443:443 --privileged rancher/rancher
 
 Open your browser to https://localhost
 
@@ -51,10 +51,11 @@ This repo is a meta-repo used for packaging and contains the majority of rancher
 * https://github.com/rancher/types
 * https://github.com/rancher/norman
 * https://github.com/rancher/kontainer-engine
+* https://github.com/rancher/machine
 * https://github.com/rancher/rke
 * https://github.com/rancher/ui
 
-Rancher also includes other open source llbraries and projects.  Please [go here](https://github.com/rancher/rancher/blob/master/vendor.conf) to view the entire list.
+Rancher also includes other open source libraries and projects, [see go.mod](https://github.com/rancher/rancher/blob/master/go.mod) for the full list.
 
 ## Support, Discussion, and Community
 If you need any help with Rancher or RancherOS, please join us at either our [Rancher forums](http://forums.rancher.com/), [#rancher IRC channel](http://webchat.freenode.net/?channels=rancher) or [Slack](https://slack.rancher.io/) where most of our team hangs out at.
@@ -67,7 +68,7 @@ For security issues, please email security@rancher.com instead of posting a publ
 
 # License
 
-Copyright (c) 2014-2019 [Rancher Labs, Inc.](http://rancher.com)
+Copyright (c) 2014-2020 [Rancher Labs, Inc.](http://rancher.com)
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.

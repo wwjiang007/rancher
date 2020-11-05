@@ -5,27 +5,26 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/rancher/rancher/pkg/controllers/management/globalnamespacerbac"
-	corev1 "github.com/rancher/types/apis/core/v1"
-	v3 "github.com/rancher/types/apis/management.cattle.io/v3"
-	"github.com/rancher/types/config"
+	v32 "github.com/rancher/rancher/pkg/apis/management.cattle.io/v3"
+
+	"github.com/rancher/rancher/pkg/controllers/management/rbac"
+	typesv1 "github.com/rancher/rancher/pkg/generated/norman/core/v1"
+	"github.com/rancher/rancher/pkg/namespace"
+	"github.com/rancher/rancher/pkg/types/config"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
 type Controller struct {
-	cloudCredentials  corev1.SecretInterface
 	managementContext *config.ManagementContext
 }
 
 func Register(ctx context.Context, management *config.ManagementContext) {
-	cloudCredentials := management.Core.Secrets("")
 	m := Controller{
-		cloudCredentials:  cloudCredentials,
 		managementContext: management,
 	}
-	m.cloudCredentials.AddHandler(ctx, "management-cloudcredential-controller", m.ccSync)
+	management.Core.Secrets("").AddHandler(ctx, "management-cloudcredential-controller", m.ccSync)
 }
 
 func (n *Controller) ccSync(key string, cloudCredential *v1.Secret) (runtime.Object, error) {
@@ -39,12 +38,12 @@ func (n *Controller) ccSync(key string, cloudCredential *v1.Secret) (runtime.Obj
 	if err != nil {
 		return cloudCredential, err
 	}
-	creatorID, ok := metaAccessor.GetAnnotations()[globalnamespacerbac.CreatorIDAnn]
+	creatorID, ok := metaAccessor.GetAnnotations()[rbac.CreatorIDAnn]
 	if !ok {
 		return cloudCredential, fmt.Errorf("cloud credential %v has no creatorId annotation", cloudCredential.Name)
 	}
-	if err := globalnamespacerbac.CreateRoleAndRoleBinding(
-		globalnamespacerbac.CloudCredentialResource, cloudCredential.Name, "v1", creatorID, []string{"*"}, cloudCredential.UID, []v3.Member{},
+	if err := rbac.CreateRoleAndRoleBinding(
+		rbac.CloudCredentialResource, typesv1.SecretResource.Kind, cloudCredential.Name, namespace.GlobalNamespace, "v1", creatorID, []string{"*"}, cloudCredential.UID, []v32.Member{},
 		n.managementContext); err != nil {
 		return nil, err
 	}

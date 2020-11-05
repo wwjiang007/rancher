@@ -2,32 +2,48 @@ package settings
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 
-	v3 "github.com/rancher/types/apis/management.cattle.io/v3"
+	v32 "github.com/rancher/rancher/pkg/apis/management.cattle.io/v3"
+	authsettings "github.com/rancher/rancher/pkg/auth/settings"
+	"github.com/sirupsen/logrus"
 )
 
 var (
+	releasePattern = regexp.MustCompile("^v[0-9]")
 	settings       = map[string]Setting{}
 	provider       Provider
 	InjectDefaults string
 
-	AgentImage                        = NewSetting("agent-image", "rancher/rancher-agent:master")
-	AuthImage                         = NewSetting("auth-image", v3.ToolsSystemImages.AuthSystemImages.KubeAPIAuth)
+	AgentImage                        = NewSetting("agent-image", "rancher/rancher-agent:master-head")
+	AuthImage                         = NewSetting("auth-image", v32.ToolsSystemImages.AuthSystemImages.KubeAPIAuth)
+	AuthTokenMaxTTLMinutes            = NewSetting("auth-token-max-ttl-minutes", "0") // never expire
+	AuthorizationCacheTTLSeconds      = NewSetting("authorization-cache-ttl-seconds", "10")
+	AuthorizationDenyCacheTTLSeconds  = NewSetting("authorization-deny-cache-ttl-seconds", "10")
+	AzureGroupCacheSize               = NewSetting("azure-group-cache-size", "10000")
 	CACerts                           = NewSetting("cacerts", "")
 	CLIURLDarwin                      = NewSetting("cli-url-darwin", "https://releases.rancher.com/cli/v1.0.0-alpha8/rancher-darwin-amd64-v1.0.0-alpha8.tar.gz")
 	CLIURLLinux                       = NewSetting("cli-url-linux", "https://releases.rancher.com/cli/v1.0.0-alpha8/rancher-linux-amd64-v1.0.0-alpha8.tar.gz")
 	CLIURLWindows                     = NewSetting("cli-url-windows", "https://releases.rancher.com/cli/v1.0.0-alpha8/rancher-windows-386-v1.0.0-alpha8.zip")
+	ClusterControllerStartCount       = NewSetting("cluster-controller-start-count", "50")
 	EngineInstallURL                  = NewSetting("engine-install-url", "https://releases.rancher.com/install-docker/19.03.sh")
 	EngineISOURL                      = NewSetting("engine-iso-url", "https://releases.rancher.com/os/latest/rancheros-vmware.iso")
 	EngineNewestVersion               = NewSetting("engine-newest-version", "v17.12.0")
 	EngineSupportedRange              = NewSetting("engine-supported-range", "~v1.11.2 || ~v1.12.0 || ~v1.13.0 || ~v17.03.0 || ~v17.06.0 || ~v17.09.0 || ~v18.06.0 || ~v18.09.0 || ~v19.03.0 ")
 	FirstLogin                        = NewSetting("first-login", "true")
 	GlobalRegistryEnabled             = NewSetting("global-registry-enabled", "false")
+	GithubProxyAPIURL                 = NewSetting("github-proxy-api-url", "https://api.github.com")
 	HelmVersion                       = NewSetting("helm-version", "dev")
+	HelmMaxHistory                    = NewSetting("helm-max-history", "10")
 	IngressIPDomain                   = NewSetting("ingress-ip-domain", "xip.io")
 	InstallUUID                       = NewSetting("install-uuid", "")
+	JailerTimeout                     = NewSetting("jailer-timeout", "60")
+	KubeconfigGenerateToken           = NewSetting("kubeconfig-generate-token", "true")
+	KubeconfigTokenTTLMinutes         = NewSetting("kubeconfig-token-ttl-minutes", "960") // 16 hours
 	KubernetesVersion                 = NewSetting("k8s-version", "")
 	KubernetesVersionToServiceOptions = NewSetting("k8s-version-to-service-options", "")
 	KubernetesVersionToSystemImages   = NewSetting("k8s-version-to-images", "")
@@ -43,20 +59,25 @@ var (
 	ServerURL                         = NewSetting("server-url", "")
 	ServerVersion                     = NewSetting("server-version", "dev")
 	SystemDefaultRegistry             = NewSetting("system-default-registry", "")
-	SystemNamespaces                  = NewSetting("system-namespaces", "kube-system,kube-public,cattle-system,cattle-alerting,cattle-logging,cattle-pipeline,cattle-prometheus,ingress-nginx,cattle-global-data,cattle-istio,kube-node-lease,cert-manager")
-	TelemetryOpt                      = NewSetting("telemetry-opt", "prompt")
+	SystemNamespaces                  = NewSetting("system-namespaces", "kube-system,kube-public,cattle-system,cattle-alerting,cattle-logging,cattle-pipeline,cattle-prometheus,ingress-nginx,cattle-global-data,cattle-istio,kube-node-lease,cert-manager,cattle-global-nt,security-scan,fleet-system")
+	TelemetryOpt                      = NewSetting("telemetry-opt", "")
 	TLSMinVersion                     = NewSetting("tls-min-version", "1.2")
 	TLSCiphers                        = NewSetting("tls-ciphers", "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305")
+	UIBanners                         = NewSetting("ui-banners", "{}")
+	UIDefaultLanding                  = NewSetting("ui-default-landing", "")
 	UIFeedBackForm                    = NewSetting("ui-feedback-form", "")
 	UIIndex                           = NewSetting("ui-index", "https://releases.rancher.com/ui/latest2/index.html")
-	UIPath                            = NewSetting("ui-path", "")
+	UIPath                            = NewSetting("ui-path", "/usr/share/rancher/ui")
+	UIDashboardIndex                  = NewSetting("ui-dashboard-index", "https://releases.rancher.com/dashboard/latest/index.html")
+	UIDashboardPath                   = NewSetting("ui-dashboard-path", "/usr/share/rancher/ui-dashboard")
+	UIPreferred                       = NewSetting("ui-preferred", "ember")
+	UIOfflinePreferred                = NewSetting("ui-offline-preferred", "dynamic")
+	UIIssues                          = NewSetting("ui-issues", "")
 	UIPL                              = NewSetting("ui-pl", "rancher")
 	UIKubernetesSupportedVersions     = NewSetting("ui-k8s-supported-versions-range", ">= 1.11.0 <=1.14.x")
 	UIKubernetesDefaultVersion        = NewSetting("ui-k8s-default-version-range", "<=1.14.x")
 	WhitelistDomain                   = NewSetting("whitelist-domain", "forums.rancher.com")
 	WhitelistEnvironmentVars          = NewSetting("whitelist-envvars", "HTTP_PROXY,HTTPS_PROXY,NO_PROXY")
-	SystemExternalDNSCatalogID        = NewSetting("system-externaldns-catalog-id", "catalog://?catalog=system-library&template=rancher-external-dns&version=0.0.2")
-	SystemCISBenchmarkCatalogID       = NewSetting("system-cis-benchmark-catalog-id", "catalog://?catalog=system-library&template=rancher-cis-benchmark&version=0.1.0")
 	AuthUserInfoResyncCron            = NewSetting("auth-user-info-resync-cron", "0 0 * * *")
 	AuthUserSessionTTLMinutes         = NewSetting("auth-user-session-ttl-minutes", "960")   // 16 hours
 	AuthUserInfoMaxAgeSeconds         = NewSetting("auth-user-info-max-age-seconds", "3600") // 1 hour
@@ -65,9 +86,40 @@ var (
 	ClusterTemplateEnforcement        = NewSetting("cluster-template-enforcement", "false")
 	InitialDockerRootDir              = NewSetting("initial-docker-root-dir", "/var/lib/docker")
 	SystemCatalog                     = NewSetting("system-catalog", "external") // Options are 'external' or 'bundled'
+	ChartDefaultBranch                = NewSetting("chart-default-branch", "dev-v2.5")
+	PartnerChartDefaultBranch         = NewSetting("partner-chart-default-branch", "main")
+	FleetDefaultWorkspaceName         = NewSetting("fleet-default-workspace-name", "fleet-default") // fleetWorkspaceName to assign to clusters with none
+	ShellImage                        = NewSetting("shell-image", "rancher/shell:v0.1.5")
+	IgnoreNodeName                    = NewSetting("ignore-node-name", "") // nodes to ignore when syncing v1.node to v3.node
+	NoDefaultAdmin                    = NewSetting("no-default-admin", "")
+	RestrictedDefaultAdmin            = NewSetting("restricted-default-admin", "false") // When bootstrapping the admin for the first time, give them the global role restricted-admin
+	EKSUpstreamRefreshCron            = NewSetting("eks-refresh-cron", "*/5 * * * *")
+	HideLocalCluster                  = NewSetting("hide-local-cluster", "false")
 )
 
+func FullShellImage() string {
+	return PrefixPrivateRegistry(ShellImage.Get())
+}
+
+func PrefixPrivateRegistry(image string) string {
+	private := SystemDefaultRegistry.Get()
+	if private == "" {
+		return image
+	}
+	return private + "/" + image
+}
+
+func IsRelease() bool {
+	return !strings.Contains(ServerVersion.Get(), "head") && releasePattern.MatchString(ServerVersion.Get())
+}
+
 func init() {
+	// setup auth setting
+	authsettings.AuthUserInfoResyncCron = AuthUserInfoResyncCron
+	authsettings.AuthUserSessionTTLMinutes = AuthUserSessionTTLMinutes
+	authsettings.AuthUserInfoMaxAgeSeconds = AuthUserInfoMaxAgeSeconds
+	authsettings.FirstLogin = FirstLogin
+
 	if InjectDefaults == "" {
 		return
 	}
@@ -126,6 +178,20 @@ func (s Setting) Get() string {
 	return provider.Get(s.Name)
 }
 
+func (s Setting) GetInt() int {
+	v := s.Get()
+	i, err := strconv.Atoi(v)
+	if err == nil {
+		return i
+	}
+	logrus.Errorf("failed to parse setting %s=%s as int: %v", s.Name, v, err)
+	i, err = strconv.Atoi(s.Default)
+	if err != nil {
+		return 0
+	}
+	return i
+}
+
 func SetProvider(p Provider) error {
 	if err := p.SetAll(settings); err != nil {
 		return err
@@ -143,19 +209,23 @@ func NewSetting(name, def string) Setting {
 	return s
 }
 
+func GetEnvKey(key string) string {
+	return "CATTLE_" + strings.ToUpper(strings.Replace(key, "-", "_", -1))
+}
+
 func getMetadataConfig() string {
+	branch := os.Getenv("RANCHER_METADATA_BRANCH")
+	if branch == "" {
+		branch = "dev-v2.5"
+	}
 	data := map[string]interface{}{
-		"url":                      "https://github.com/rancher/kontainer-driver-metadata.git",
-		"branch":                   "master",
+		"url":                      fmt.Sprintf("https://releases.rancher.com/kontainer-driver-metadata/%s/data.json", branch),
 		"refresh-interval-minutes": "1440",
 	}
 	ans, err := json.Marshal(data)
-	if err == nil {
-		return string(ans)
+	if err != nil {
+		logrus.Errorf("error getting metadata config %v", err)
+		return ""
 	}
-	return ""
-}
-
-func GetEnvKey(key string) string {
-	return "CATTLE_" + strings.ToUpper(strings.Replace(key, "-", "_", -1))
+	return string(ans)
 }

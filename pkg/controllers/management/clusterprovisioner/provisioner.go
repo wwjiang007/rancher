@@ -11,19 +11,23 @@ import (
 	"time"
 
 	"github.com/mitchellh/mapstructure"
-	"github.com/rancher/kontainer-engine/drivers/rke"
-	"github.com/rancher/kontainer-engine/service"
 	"github.com/rancher/norman/controller"
 	"github.com/rancher/norman/types/convert"
 	"github.com/rancher/norman/types/slice"
 	"github.com/rancher/norman/types/values"
+	apimgmtv3 "github.com/rancher/rancher/pkg/apis/management.cattle.io/v3"
+	util "github.com/rancher/rancher/pkg/cluster"
 	kd "github.com/rancher/rancher/pkg/controllers/management/kontainerdrivermetadata"
+	v1 "github.com/rancher/rancher/pkg/generated/norman/apps/v1"
+	v3 "github.com/rancher/rancher/pkg/generated/norman/management.cattle.io/v3"
+	"github.com/rancher/rancher/pkg/kontainer-engine/drivers/rke"
+	"github.com/rancher/rancher/pkg/kontainer-engine/service"
 	"github.com/rancher/rancher/pkg/ref"
 	"github.com/rancher/rancher/pkg/rkedialerfactory"
 	"github.com/rancher/rancher/pkg/settings"
+	"github.com/rancher/rancher/pkg/types/config"
 	"github.com/rancher/rke/services"
-	v3 "github.com/rancher/types/apis/management.cattle.io/v3"
-	"github.com/rancher/types/config"
+	rketypes "github.com/rancher/rke/types"
 	"github.com/sirupsen/logrus"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -36,19 +40,22 @@ import (
 const (
 	RKEDriverKey          = "rancherKubernetesEngineConfig"
 	KontainerEngineUpdate = "provisioner.cattle.io/ke-driver-update"
+	RkeRestoreAnnotation  = "rke.cattle.io/restore"
 )
 
 type Provisioner struct {
 	ClusterController     v3.ClusterController
 	Clusters              v3.ClusterInterface
 	NodeLister            v3.NodeLister
+	Nodes                 v3.NodeInterface
 	engineService         *service.EngineService
 	backoff               *flowcontrol.Backoff
 	KontainerDriverLister v3.KontainerDriverLister
 	DynamicSchemasLister  v3.DynamicSchemaLister
+	DaemonsetLister       v1.DaemonSetLister
 	Backups               v3.EtcdBackupLister
-	RKESystemImages       v3.RKEK8sSystemImageInterface
-	RKESystemImagesLister v3.RKEK8sSystemImageLister
+	RKESystemImages       v3.RkeK8sSystemImageInterface
+	RKESystemImagesLister v3.RkeK8sSystemImageLister
 }
 
 func Register(ctx context.Context, management *config.ManagementContext) {
@@ -57,24 +64,27 @@ func Register(ctx context.Context, management *config.ManagementContext) {
 		Clusters:              management.Management.Clusters(""),
 		ClusterController:     management.Management.Clusters("").Controller(),
 		NodeLister:            management.Management.Nodes("").Controller().Lister(),
+		Nodes:                 management.Management.Nodes(""),
 		backoff:               flowcontrol.NewBackOff(30*time.Second, 10*time.Minute),
 		KontainerDriverLister: management.Management.KontainerDrivers("").Controller().Lister(),
 		DynamicSchemasLister:  management.Management.DynamicSchemas("").Controller().Lister(),
 		Backups:               management.Management.EtcdBackups("").Controller().Lister(),
-		RKESystemImagesLister: management.Management.RKEK8sSystemImages("").Controller().Lister(),
-		RKESystemImages:       management.Management.RKEK8sSystemImages(""),
+		RKESystemImagesLister: management.Management.RkeK8sSystemImages("").Controller().Lister(),
+		RKESystemImages:       management.Management.RkeK8sSystemImages(""),
+		DaemonsetLister:       management.Apps.DaemonSets("").Controller().Lister(),
 	}
-
 	// Add handlers
 	p.Clusters.AddLifecycle(ctx, "cluster-provisioner-controller", p)
 	management.Management.Nodes("").AddHandler(ctx, "cluster-provisioner-controller", p.machineChanged)
 
 	local := &rkedialerfactory.RKEDialerFactory{
 		Factory: management.Dialer,
+		Ctx:     ctx,
 	}
 	docker := &rkedialerfactory.RKEDialerFactory{
 		Factory: management.Dialer,
 		Docker:  true,
+		Ctx:     ctx,
 	}
 
 	driver := service.Drivers[service.RancherKubernetesEngineDriverName]
@@ -83,17 +93,22 @@ func Register(ctx context.Context, management *config.ManagementContext) {
 	rkeDriver.LocalDialer = local.Build
 	rkeDriver.WrapTransportFactory = docker.WrapTransport
 	mgmt := management.Management
-	rkeDriver.DataStore = NewDataStore(mgmt.RKEAddons("").Controller().Lister(),
-		mgmt.RKEAddons(""),
-		mgmt.RKEK8sServiceOptions("").Controller().Lister(),
-		mgmt.RKEK8sServiceOptions(""),
-		mgmt.RKEK8sSystemImages("").Controller().Lister(),
-		mgmt.RKEK8sSystemImages(""))
+	rkeDriver.DataStore = NewDataStore(mgmt.RkeAddons("").Controller().Lister(),
+		mgmt.RkeAddons(""),
+		mgmt.RkeK8sServiceOptions("").Controller().Lister(),
+		mgmt.RkeK8sServiceOptions(""),
+		mgmt.RkeK8sSystemImages("").Controller().Lister(),
+		mgmt.RkeK8sSystemImages(""))
 }
 
 func (p *Provisioner) Remove(cluster *v3.Cluster) (runtime.Object, error) {
+	if cluster.Spec.EKSConfig != nil {
+		logrus.Debugf("EKS cluster [%s] will be managed by eks-operator-controller, skipping remove", cluster.Name)
+		return cluster, nil
+	}
+
 	logrus.Infof("Deleting cluster [%s]", cluster.Name)
-	if skipProvisioning(cluster) ||
+	if skipLocalK3sImported(cluster) ||
 		cluster.Status.Driver == "" {
 		return nil, nil
 	}
@@ -116,7 +131,12 @@ func (p *Provisioner) Remove(cluster *v3.Cluster) (runtime.Object, error) {
 }
 
 func (p *Provisioner) Updated(cluster *v3.Cluster) (runtime.Object, error) {
-	obj, err := v3.ClusterConditionUpdated.Do(cluster, func() (runtime.Object, error) {
+	if cluster.Spec.EKSConfig != nil {
+		logrus.Debugf("EKS cluster [%s] will be managed by eks-operator-controller, skipping update", cluster.Name)
+		return cluster, nil
+	}
+
+	obj, err := apimgmtv3.ClusterConditionUpdated.Do(cluster, func() (runtime.Object, error) {
 		anno, _ := cluster.Annotations[KontainerEngineUpdate]
 		if anno == "updated" {
 			// Cluster has already been updated proceed as usual
@@ -248,7 +268,7 @@ func (p *Provisioner) setKontainerEngineUpdate(cluster *v3.Cluster, anno string)
 		return true, nil
 	})
 	if err != nil {
-		return cluster, fmt.Errorf("Failed to update cluster [%s]: %v", cluster.Name, err)
+		return cluster, fmt.Errorf("[setKontainerEngineUpdate] Failed to update cluster [%s]: %v", cluster.Name, err)
 	}
 	return cluster, nil
 }
@@ -267,7 +287,7 @@ func setVersion(cluster *v3.Cluster) {
 		}
 	} else if cluster.Spec.AmazonElasticContainerServiceConfig != nil {
 		if cluster.Status.Version != nil {
-			setConfigVersion := func(config *v3.MapStringInterface) {
+			setConfigVersion := func(config *apimgmtv3.MapStringInterface) {
 				v, found := values.GetValue(*config, "kubernetesVersion")
 				if !found || convert.ToString(v) == "" && cluster.Status.Version != nil && cluster.Status.Version.Major != "" && len(cluster.Status.Version.Minor) > 1 {
 					values.PutValue(*config, fmt.Sprintf("%s.%s", cluster.Status.Version.Major, cluster.Status.Version.Minor[:2]), "kubernetesVersion")
@@ -292,10 +312,23 @@ func (p *Provisioner) update(cluster *v3.Cluster, create bool) (*v3.Cluster, err
 		return cluster, err
 	}
 
-	v3.ClusterConditionProvisioned.True(cluster)
-	v3.ClusterConditionProvisioned.Message(cluster, "")
-	v3.ClusterConditionProvisioned.Reason(cluster, "")
-	v3.ClusterConditionPending.True(cluster)
+	apimgmtv3.ClusterConditionProvisioned.True(cluster)
+	apimgmtv3.ClusterConditionProvisioned.Message(cluster, "")
+	apimgmtv3.ClusterConditionProvisioned.Reason(cluster, "")
+	apimgmtv3.ClusterConditionPending.True(cluster)
+
+	if cluster.Spec.RancherKubernetesEngineConfig != nil || cluster.Spec.GenericEngineConfig != nil {
+		return cluster, nil
+	}
+	nodes, err := p.NodeLister.List(cluster.Name, labels.Everything())
+	if err != nil {
+		return cluster, err
+	}
+	err = p.k3sBasedClusterConfig(cluster, nodes)
+	if err != nil {
+		return cluster, err
+	}
+
 	return cluster, nil
 }
 
@@ -308,17 +341,21 @@ func (p *Provisioner) machineChanged(key string, machine *v3.Node) (runtime.Obje
 }
 
 func (p *Provisioner) Create(cluster *v3.Cluster) (runtime.Object, error) {
-	var err error
-
-	// Initialize conditions, be careful to not continually update them
-	v3.ClusterConditionPending.CreateUnknownIfNotExists(cluster)
-	v3.ClusterConditionProvisioned.CreateUnknownIfNotExists(cluster)
-
-	if v3.ClusterConditionWaiting.GetStatus(cluster) == "" {
-		v3.ClusterConditionWaiting.Unknown(cluster)
+	if cluster.Spec.EKSConfig != nil {
+		logrus.Debugf("EKS cluster [%s] will be managed by eks-operator-controller, skipping create", cluster.Name)
+		return cluster, nil
 	}
-	if v3.ClusterConditionWaiting.GetMessage(cluster) == "" {
-		v3.ClusterConditionWaiting.Message(cluster, "Waiting for API to be available")
+
+	var err error
+	// Initialize conditions, be careful to not continually update them
+	apimgmtv3.ClusterConditionPending.CreateUnknownIfNotExists(cluster)
+	apimgmtv3.ClusterConditionProvisioned.CreateUnknownIfNotExists(cluster)
+
+	if apimgmtv3.ClusterConditionWaiting.GetStatus(cluster) == "" {
+		apimgmtv3.ClusterConditionWaiting.Unknown(cluster)
+	}
+	if apimgmtv3.ClusterConditionWaiting.GetMessage(cluster) == "" {
+		apimgmtv3.ClusterConditionWaiting.Message(cluster, "Waiting for API to be available")
 	}
 
 	cluster, err = p.pending(cluster)
@@ -330,14 +367,15 @@ func (p *Provisioner) Create(cluster *v3.Cluster) (runtime.Object, error) {
 }
 
 func (p *Provisioner) provision(cluster *v3.Cluster) (*v3.Cluster, error) {
-	obj, err := v3.ClusterConditionProvisioned.Do(cluster, func() (runtime.Object, error) {
+	obj, err := apimgmtv3.ClusterConditionProvisioned.Do(cluster, func() (runtime.Object, error) {
 		return p.update(cluster, true)
 	})
 	return obj.(*v3.Cluster), err
 }
 
 func (p *Provisioner) pending(cluster *v3.Cluster) (*v3.Cluster, error) {
-	if skipProvisioning(cluster) {
+
+	if skipLocalK3sImported(cluster) {
 		return cluster, nil
 	}
 
@@ -354,8 +392,8 @@ func (p *Provisioner) pending(cluster *v3.Cluster) (*v3.Cluster, error) {
 
 	if driver != cluster.Status.Driver {
 		cluster.Status.Driver = driver
-		if driver == v3.ClusterDriverRKE && cluster.Spec.RancherKubernetesEngineConfig == nil {
-			cluster.Spec.RancherKubernetesEngineConfig = &v3.RancherKubernetesEngineConfig{}
+		if driver == apimgmtv3.ClusterDriverRKE && cluster.Spec.RancherKubernetesEngineConfig == nil {
+			cluster.Spec.RancherKubernetesEngineConfig = &rketypes.RancherKubernetesEngineConfig{}
 		}
 		return p.Clusters.Update(cluster)
 	}
@@ -364,7 +402,7 @@ func (p *Provisioner) pending(cluster *v3.Cluster) (*v3.Cluster, error) {
 
 }
 
-func (p *Provisioner) backoffFailure(cluster *v3.Cluster, spec *v3.ClusterSpec) (bool, time.Duration) {
+func (p *Provisioner) backoffFailure(cluster *v3.Cluster, spec *apimgmtv3.ClusterSpec) (bool, time.Duration) {
 	if cluster.Status.FailedSpec == nil {
 		return false, 0
 	}
@@ -384,9 +422,8 @@ func (p *Provisioner) backoffFailure(cluster *v3.Cluster, spec *v3.ClusterSpec) 
 	return false, 0
 }
 
-// reconcileCluster returns true if waiting or false if ready to provision
 func (p *Provisioner) reconcileCluster(cluster *v3.Cluster, create bool) (*v3.Cluster, error) {
-	if skipProvisioning(cluster) {
+	if skipLocalK3sImported(cluster) {
 		return cluster, nil
 	}
 
@@ -395,8 +432,8 @@ func (p *Provisioner) reconcileCluster(cluster *v3.Cluster, create bool) (*v3.Cl
 		err                                      error
 	)
 
-	if cluster.Name != "local" && !v3.ClusterConditionServiceAccountMigrated.IsTrue(cluster) &&
-		v3.ClusterConditionProvisioned.IsTrue(cluster) {
+	if cluster.Name != "local" && !apimgmtv3.ClusterConditionServiceAccountMigrated.IsTrue(cluster) &&
+		apimgmtv3.ClusterConditionProvisioned.IsTrue(cluster) {
 		driverName, err := p.validateDriver(cluster)
 		if err != nil {
 			return nil, err
@@ -413,7 +450,7 @@ func (p *Provisioner) reconcileCluster(cluster *v3.Cluster, create bool) (*v3.Cl
 		}
 
 		cluster.Status.ServiceAccountToken = serviceAccountToken
-		v3.ClusterConditionServiceAccountMigrated.True(cluster)
+		apimgmtv3.ClusterConditionServiceAccountMigrated.True(cluster)
 
 		// Update the cluster in k8s
 		cluster, err = p.Clusters.Update(cluster)
@@ -442,6 +479,8 @@ func (p *Provisioner) reconcileCluster(cluster *v3.Cluster, create bool) (*v3.Cl
 	var updateTriggered bool
 	if create {
 		logrus.Infof("Creating cluster [%s]", cluster.Name)
+		// setting updateTriggered to true since rke up will be called on cluster create
+		updateTriggered = true
 		apiEndpoint, serviceAccountToken, caCert, err = p.driverCreate(cluster, *spec)
 		if err != nil && err.Error() == "cluster already exists" {
 			logrus.Infof("Create done, Updating cluster [%s]", cluster.Name)
@@ -457,10 +496,10 @@ func (p *Provisioner) reconcileCluster(cluster *v3.Cluster, create bool) (*v3.Cl
 		logrus.Infof("Updating cluster [%s]", cluster.Name)
 
 		// Attempt to manually trigger updating, otherwise it will not be triggered until after exiting reconcile
-		v3.ClusterConditionUpdated.Unknown(cluster)
+		apimgmtv3.ClusterConditionUpdated.Unknown(cluster)
 		cluster, err = p.Clusters.Update(cluster)
 		if err != nil {
-			return cluster, fmt.Errorf("Failed to update cluster [%s]: %v", cluster.Name, err)
+			return cluster, fmt.Errorf("[reconcileCluster] Failed to update cluster [%s]: %v", cluster.Name, err)
 		}
 
 		apiEndpoint, serviceAccountToken, caCert, updateTriggered, err = p.driverUpdate(cluster, *spec)
@@ -486,7 +525,7 @@ func (p *Provisioner) reconcileCluster(cluster *v3.Cluster, create bool) (*v3.Cl
 		return nil, err
 	}
 
-	v3.ClusterConditionServiceAccountMigrated.True(cluster)
+	apimgmtv3.ClusterConditionServiceAccountMigrated.True(cluster)
 
 	saved := false
 	for i := 0; i < 20; i++ {
@@ -506,6 +545,11 @@ func (p *Provisioner) reconcileCluster(cluster *v3.Cluster, create bool) (*v3.Cl
 		cluster.Status.CACert = caCert
 		resetRkeConfigFlags(cluster, updateTriggered)
 
+		// initialize on first rke up
+		if cluster.Status.AppliedSpec.RancherKubernetesEngineConfig != nil && cluster.Status.NodeVersion == 0 {
+			cluster.Status.NodeVersion++
+		}
+
 		if cluster, err = p.Clusters.Update(cluster); err == nil {
 			saved = true
 			break
@@ -519,13 +563,22 @@ func (p *Provisioner) reconcileCluster(cluster *v3.Cluster, create bool) (*v3.Cl
 		return cluster, fmt.Errorf("failed to update cluster")
 	}
 
+	if cluster.Status.AppliedSpec.RancherKubernetesEngineConfig != nil {
+		logrus.Infof("Updated cluster [%s] with node version [%v]", cluster.Name, cluster.Status.NodeVersion)
+		p.reconcileForUpgrade(cluster.Name)
+	}
+
 	logrus.Infof("Provisioned cluster [%s]", cluster.Name)
 	return cluster, nil
 }
 
+func (p *Provisioner) reconcileForUpgrade(clusterName string) {
+	p.Nodes.Controller().Enqueue(clusterName, "upgrade_")
+}
+
 func (p *Provisioner) setGenericConfigs(cluster *v3.Cluster) {
 	if cluster.Spec.GenericEngineConfig == nil || cluster.Status.AppliedSpec.GenericEngineConfig == nil {
-		setGenericConfig := func(spec *v3.ClusterSpec) {
+		setGenericConfig := func(spec *apimgmtv3.ClusterSpec) {
 			if spec.GenericEngineConfig == nil {
 				if spec.AmazonElasticContainerServiceConfig != nil {
 					spec.GenericEngineConfig = spec.AmazonElasticContainerServiceConfig
@@ -555,10 +608,14 @@ func (p *Provisioner) setGenericConfigs(cluster *v3.Cluster) {
 func resetRkeConfigFlags(cluster *v3.Cluster, updateTriggered bool) {
 	if cluster.Spec.RancherKubernetesEngineConfig != nil {
 		cluster.Spec.RancherKubernetesEngineConfig.RotateCertificates = nil
-		cluster.Spec.RancherKubernetesEngineConfig.Restore = v3.RestoreConfig{}
+		if cluster.Spec.RancherKubernetesEngineConfig.Restore.Restore {
+			cluster.Annotations[RkeRestoreAnnotation] = "true"
+			cluster.Status.NodeVersion++
+		}
+		cluster.Spec.RancherKubernetesEngineConfig.Restore = rketypes.RestoreConfig{}
 		if cluster.Status.AppliedSpec.RancherKubernetesEngineConfig != nil {
 			cluster.Status.AppliedSpec.RancherKubernetesEngineConfig.RotateCertificates = nil
-			cluster.Status.AppliedSpec.RancherKubernetesEngineConfig.Restore = v3.RestoreConfig{}
+			cluster.Status.AppliedSpec.RancherKubernetesEngineConfig.Restore = rketypes.RestoreConfig{}
 		}
 		if !updateTriggered {
 			return
@@ -570,8 +627,8 @@ func resetRkeConfigFlags(cluster *v3.Cluster, updateTriggered bool) {
 	}
 }
 
-func copyMap(toCopy v3.MapStringInterface) v3.MapStringInterface {
-	newMap := v3.MapStringInterface{}
+func copyMap(toCopy apimgmtv3.MapStringInterface) apimgmtv3.MapStringInterface {
+	newMap := apimgmtv3.MapStringInterface{}
 
 	for k, v := range toCopy {
 		newMap[k] = v
@@ -580,7 +637,7 @@ func copyMap(toCopy v3.MapStringInterface) v3.MapStringInterface {
 	return newMap
 }
 
-func (p *Provisioner) censorGenericEngineConfig(input v3.ClusterSpec) (v3.ClusterSpec, error) {
+func (p *Provisioner) censorGenericEngineConfig(input apimgmtv3.ClusterSpec) (apimgmtv3.ClusterSpec, error) {
 	if input.GenericEngineConfig == nil {
 		// nothing to do
 		return input, nil
@@ -598,7 +655,7 @@ func (p *Provisioner) censorGenericEngineConfig(input v3.ClusterSpec) (v3.Cluste
 
 	driver, err := p.KontainerDriverLister.Get("", driverName)
 	if err != nil {
-		return v3.ClusterSpec{}, err
+		return apimgmtv3.ClusterSpec{}, err
 	}
 
 	var schemaName string
@@ -610,7 +667,7 @@ func (p *Provisioner) censorGenericEngineConfig(input v3.ClusterSpec) (v3.Cluste
 
 	kontainerDriverSchema, err := p.DynamicSchemasLister.Get("", strings.ToLower(schemaName))
 	if err != nil {
-		return v3.ClusterSpec{}, fmt.Errorf("error getting dynamic schema %v", err)
+		return apimgmtv3.ClusterSpec{}, fmt.Errorf("error getting dynamic schema %v", err)
 	}
 
 	for key := range config {
@@ -624,11 +681,16 @@ func (p *Provisioner) censorGenericEngineConfig(input v3.ClusterSpec) (v3.Cluste
 	return input, nil
 }
 
-func skipProvisioning(cluster *v3.Cluster) bool {
-	return cluster.Status.Driver == v3.ClusterDriverLocal || cluster.Status.Driver == v3.ClusterDriverImported
+func skipLocalK3sImported(cluster *apimgmtv3.Cluster) bool {
+	return cluster.Status.Driver == apimgmtv3.ClusterDriverLocal ||
+		cluster.Status.Driver == apimgmtv3.ClusterDriverImported ||
+		cluster.Status.Driver == apimgmtv3.ClusterDriverK3s ||
+		cluster.Status.Driver == apimgmtv3.ClusterDriverK3os ||
+		cluster.Status.Driver == apimgmtv3.ClusterDriverRke2 ||
+		cluster.Status.Driver == apimgmtv3.ClusterDriverRancherD
 }
 
-func (p *Provisioner) getConfig(reconcileRKE bool, spec v3.ClusterSpec, driverName, clusterName string) (*v3.ClusterSpec, interface{}, error) {
+func (p *Provisioner) getConfig(reconcileRKE bool, spec apimgmtv3.ClusterSpec, driverName, clusterName string) (*apimgmtv3.ClusterSpec, interface{}, error) {
 	var v interface{}
 	if spec.GenericEngineConfig == nil {
 		if spec.RancherKubernetesEngineConfig != nil {
@@ -644,7 +706,7 @@ func (p *Provisioner) getConfig(reconcileRKE bool, spec v3.ClusterSpec, driverNa
 		v = *spec.GenericEngineConfig
 	}
 
-	if driverName == v3.ClusterDriverRKE && reconcileRKE {
+	if driverName == apimgmtv3.ClusterDriverRKE && reconcileRKE {
 		nodes, err := p.reconcileRKENodes(clusterName)
 		if err != nil {
 			return nil, nil, err
@@ -655,8 +717,8 @@ func (p *Provisioner) getConfig(reconcileRKE bool, spec v3.ClusterSpec, driverNa
 			return nil, nil, err
 		}
 
-		copy := *spec.RancherKubernetesEngineConfig
-		spec.RancherKubernetesEngineConfig = &copy
+		rkeCopy := *spec.RancherKubernetesEngineConfig
+		spec.RancherKubernetesEngineConfig = &rkeCopy
 		spec.RancherKubernetesEngineConfig.Nodes = nodes
 		spec.RancherKubernetesEngineConfig.SystemImages = *systemImages
 
@@ -667,20 +729,24 @@ func (p *Provisioner) getConfig(reconcileRKE bool, spec v3.ClusterSpec, driverNa
 	return &spec, v, nil
 }
 
-func (p *Provisioner) getDriver(cluster *v3.Cluster) (string, error) {
+func GetDriver(cluster *v3.Cluster, driverLister v3.KontainerDriverLister) (string, error) {
 	var driver *v3.KontainerDriver
 	var err error
 
 	if cluster.Spec.GenericEngineConfig != nil {
 		kontainerDriverName := (*cluster.Spec.GenericEngineConfig)["driverName"].(string)
-		driver, err = p.KontainerDriverLister.Get("", kontainerDriverName)
+		driver, err = driverLister.Get("", kontainerDriverName)
 		if err != nil {
 			return "", err
 		}
 	}
 
+	if cluster.Spec.EKSConfig != nil {
+		return apimgmtv3.ClusterDriverEKS, nil
+	}
+
 	if cluster.Spec.RancherKubernetesEngineConfig != nil {
-		return v3.ClusterDriverRKE, nil
+		return apimgmtv3.ClusterDriverRKE, nil
 	}
 
 	if driver == nil {
@@ -693,11 +759,11 @@ func (p *Provisioner) getDriver(cluster *v3.Cluster) (string, error) {
 func (p *Provisioner) validateDriver(cluster *v3.Cluster) (string, error) {
 	oldDriver := cluster.Status.Driver
 
-	if oldDriver == v3.ClusterDriverImported {
-		return v3.ClusterDriverImported, nil
+	if oldDriver == apimgmtv3.ClusterDriverImported {
+		return apimgmtv3.ClusterDriverImported, nil
 	}
 
-	newDriver, err := p.getDriver(cluster)
+	newDriver, err := GetDriver(cluster, p.KontainerDriverLister)
 	if err != nil {
 		return "", err
 	}
@@ -724,18 +790,18 @@ func (p *Provisioner) validateDriver(cluster *v3.Cluster) (string, error) {
 	return newDriver, nil
 }
 
-func (p *Provisioner) getSystemImages(spec v3.ClusterSpec) (*v3.RKESystemImages, error) {
-	// fetch system images from settings
+func (p *Provisioner) getSystemImages(spec apimgmtv3.ClusterSpec) (*rketypes.RKESystemImages, error) {
 	version := spec.RancherKubernetesEngineConfig.Version
-	if isDeprecated(version) {
-		return nil, fmt.Errorf("failed to find system images for version %s, it is deprecated", version)
+	if version == "" {
+		return nil, fmt.Errorf("kubernetes version (spec.rancherKubernetesEngineConfig.kubernetesVersion) is unset")
 	}
+	// fetch system images from settings
 	systemImages, err := kd.GetRKESystemImages(version, p.RKESystemImagesLister, p.RKESystemImages)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find system images for version %s: %v", version, err)
 	}
 
-	privateRegistry := getPrivateRepo(spec.RancherKubernetesEngineConfig)
+	privateRegistry := util.GetPrivateRepoURL(&v3.Cluster{Spec: spec})
 	if privateRegistry == "" {
 		return &systemImages, nil
 	}
@@ -756,14 +822,7 @@ func (p *Provisioner) getSystemImages(spec v3.ClusterSpec) (*v3.RKESystemImages,
 	return &systemImages, nil
 }
 
-func getPrivateRepo(config *v3.RancherKubernetesEngineConfig) string {
-	if len(config.PrivateRegistries) > 0 {
-		return config.PrivateRegistries[0].URL
-	}
-	return settings.SystemDefaultRegistry.Get()
-}
-
-func (p *Provisioner) getSpec(cluster *v3.Cluster) (*v3.ClusterSpec, error) {
+func (p *Provisioner) getSpec(cluster *v3.Cluster) (*apimgmtv3.ClusterSpec, error) {
 	driverName, err := p.validateDriver(cluster)
 	if err != nil {
 		return nil, err
@@ -789,14 +848,6 @@ func (p *Provisioner) getSpec(cluster *v3.Cluster) (*v3.ClusterSpec, error) {
 		return nil, err
 	}
 
-	// Version is the only parameter that can be updated for EKS, if they is equal we do not need to update
-	// TODO: Replace with logic that is more adaptable
-	if cluster.Spec.GenericEngineConfig != nil && (*cluster.Spec.GenericEngineConfig)["driverName"] == "amazonelasticcontainerservice" &&
-		cluster.Status.AppliedSpec.GenericEngineConfig != nil && (*cluster.Spec.GenericEngineConfig)["kubernetesVersion"] ==
-		(*cluster.Status.AppliedSpec.GenericEngineConfig)["kubernetesVersion"] {
-		return nil, nil
-	}
-
 	if reflect.DeepEqual(oldConfig, newConfig) {
 		return nil, nil
 	}
@@ -806,7 +857,7 @@ func (p *Provisioner) getSpec(cluster *v3.Cluster) (*v3.ClusterSpec, error) {
 	return newSpec, err
 }
 
-func (p *Provisioner) reconcileRKENodes(clusterName string) ([]v3.RKEConfigNode, error) {
+func (p *Provisioner) reconcileRKENodes(clusterName string) ([]rketypes.RKEConfigNode, error) {
 	machines, err := p.NodeLister.List(clusterName, labels.Everything())
 	if err != nil {
 		return nil, err
@@ -814,13 +865,13 @@ func (p *Provisioner) reconcileRKENodes(clusterName string) ([]v3.RKEConfigNode,
 
 	etcd := false
 	controlplane := false
-	var nodes []v3.RKEConfigNode
+	var nodes []rketypes.RKEConfigNode
 	for _, machine := range machines {
 		if machine.DeletionTimestamp != nil {
 			continue
 		}
 
-		if v3.NodeConditionProvisioned.IsUnknown(machine) && (machine.Spec.Etcd || machine.Spec.ControlPlane) {
+		if apimgmtv3.NodeConditionProvisioned.IsUnknown(machine) && (machine.Spec.Etcd || machine.Spec.ControlPlane) {
 			return nil, &controller.ForgetError{
 				Err:    fmt.Errorf("waiting for %s to finish provisioning", machine.Spec.RequestedHostname),
 				Reason: "Provisioning",
@@ -835,7 +886,7 @@ func (p *Provisioner) reconcileRKENodes(clusterName string) ([]v3.RKEConfigNode,
 			continue
 		}
 
-		if !v3.NodeConditionProvisioned.IsTrue(machine) {
+		if !apimgmtv3.NodeConditionProvisioned.IsTrue(machine) {
 			continue
 		}
 
@@ -873,7 +924,7 @@ func (p *Provisioner) reconcileRKENodes(clusterName string) ([]v3.RKEConfigNode,
 	return nodes, nil
 }
 
-func (p *Provisioner) recordFailure(cluster *v3.Cluster, spec v3.ClusterSpec, err error) (*v3.Cluster, error) {
+func (p *Provisioner) recordFailure(cluster *v3.Cluster, spec apimgmtv3.ClusterSpec, err error) (*v3.Cluster, error) {
 	if err == nil {
 		p.backoff.DeleteEntry(cluster.Name)
 		if cluster.Status.FailedSpec == nil {
@@ -891,7 +942,7 @@ func (p *Provisioner) recordFailure(cluster *v3.Cluster, spec v3.ClusterSpec, er
 	return newCluster, nil
 }
 
-func (p *Provisioner) restoreClusterBackup(cluster *v3.Cluster, spec v3.ClusterSpec) (api string, token string, cert string, err error) {
+func (p *Provisioner) restoreClusterBackup(cluster *v3.Cluster, spec apimgmtv3.ClusterSpec) (api string, token string, cert string, err error) {
 	snapshot := strings.Split(spec.RancherKubernetesEngineConfig.Restore.SnapshotName, ":")[1]
 	backup, err := p.Backups.Get(cluster.Name, snapshot)
 	if err != nil {
@@ -947,7 +998,7 @@ func isValidURL(URL string) bool {
 func GetBackupFilename(backup *v3.EtcdBackup) string {
 	snapshot := backup.Name
 	if filename, err := GetBackupFilenameFromURL(backup.Spec.Filename); err == nil { // s3 file
-		// need to remove extention
+		// need to remove extension
 		snapshot = strings.TrimSuffix(filename, path.Ext(filename))
 	} else if len(backup.Spec.Filename) != 0 { // not s3 url
 		snapshot = strings.TrimSuffix(backup.Spec.Filename, path.Ext(backup.Spec.Filename))
@@ -955,7 +1006,56 @@ func GetBackupFilename(backup *v3.EtcdBackup) string {
 	return snapshot
 }
 
-func isDeprecated(version string) bool {
-	deprecatedVersions := convert.ToMapInterface(settings.KubernetesVersionsDeprecated.Get())
-	return convert.ToBool(deprecatedVersions[version])
+// transform an imported cluster into a k3s or k3os cluster using its discovered version
+func (p *Provisioner) k3sBasedClusterConfig(cluster *v3.Cluster, nodes []*v3.Node) error {
+	// version is not found until cluster is provisioned
+	if cluster.Status.Driver == "" || cluster.Status.Version == nil || len(nodes) == 0 {
+		return &controller.ForgetError{
+			Err:    fmt.Errorf("waiting for full cluster configuration"),
+			Reason: "Pending"}
+	}
+	if cluster.Status.Driver == apimgmtv3.ClusterDriverK3s ||
+		cluster.Status.Driver == apimgmtv3.ClusterDriverK3os ||
+		cluster.Status.Driver == apimgmtv3.ClusterDriverRke2 ||
+		cluster.Status.Driver == apimgmtv3.ClusterDriverRancherD {
+		return nil //no-op
+	}
+	isEmbedded := cluster.Status.Driver == apimgmtv3.ClusterDriverLocal
+
+	if strings.Contains(cluster.Status.Version.String(), "k3s") {
+		for _, node := range nodes {
+			if _, ok := node.Status.NodeLabels["k3os.io/mode"]; ok {
+				cluster.Status.Driver = apimgmtv3.ClusterDriverK3os
+				break
+			}
+		}
+		if cluster.Status.Driver != apimgmtv3.ClusterDriverK3os {
+			cluster.Status.Driver = apimgmtv3.ClusterDriverK3s
+		}
+		// only set these values on init, and not for embedded clusters as those shouldn't be upgraded
+		if cluster.Spec.K3sConfig == nil && !isEmbedded {
+			cluster.Spec.K3sConfig = &apimgmtv3.K3sConfig{
+				Version: cluster.Status.Version.String(),
+			}
+			cluster.Spec.K3sConfig.SetStrategy(1, 1)
+		}
+	} else if strings.Contains(cluster.Status.Version.String(), "rke2") {
+
+		_, err := p.DaemonsetLister.Get("cattle-system", "rancher")
+		if apierrors.IsNotFound(err) {
+			cluster.Status.Driver = apimgmtv3.ClusterDriverRke2
+		} else if err != nil {
+			return err
+		} else {
+			cluster.Status.Driver = apimgmtv3.ClusterDriverRancherD
+			return nil
+		}
+		if cluster.Spec.Rke2Config == nil {
+			cluster.Spec.Rke2Config = &apimgmtv3.Rke2Config{
+				Version: cluster.Status.Version.String(),
+			}
+			cluster.Spec.Rke2Config.SetStrategy(1, 1)
+		}
+	}
+	return nil
 }

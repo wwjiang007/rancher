@@ -4,15 +4,17 @@ import (
 	"fmt"
 	"strings"
 
+	v32 "github.com/rancher/rancher/pkg/apis/management.cattle.io/v3"
+
 	"github.com/mitchellh/mapstructure"
 	"github.com/rancher/norman/api/handler"
 	"github.com/rancher/norman/httperror"
 	"github.com/rancher/norman/types"
 	"github.com/rancher/rancher/pkg/auth/providers/common"
-	v3 "github.com/rancher/types/apis/management.cattle.io/v3"
-	managementschema "github.com/rancher/types/apis/management.cattle.io/v3/schema"
-	"github.com/rancher/types/apis/management.cattle.io/v3public"
-	client "github.com/rancher/types/client/management/v3"
+	"github.com/rancher/rancher/pkg/auth/providers/common/ldap"
+	client "github.com/rancher/rancher/pkg/client/generated/management/v3"
+	v3 "github.com/rancher/rancher/pkg/generated/norman/management.cattle.io/v3"
+	managementschema "github.com/rancher/rancher/pkg/schemas/management.cattle.io/v3"
 	"github.com/sirupsen/logrus"
 )
 
@@ -47,7 +49,7 @@ func (p *ldapProvider) testAndApply(actionName string, action *types.Action, req
 		return err
 	}
 
-	configApplyInput := &v3.LdapTestAndApplyInput{}
+	configApplyInput := &v32.LdapTestAndApplyInput{}
 
 	if err := mapstructure.Decode(input, configApplyInput); err != nil {
 		return httperror.NewAPIError(httperror.InvalidBodyContent,
@@ -56,7 +58,7 @@ func (p *ldapProvider) testAndApply(actionName string, action *types.Action, req
 
 	config := &configApplyInput.LdapConfig
 
-	login := &v3public.BasicLogin{
+	login := &v32.BasicLogin{
 		Username: configApplyInput.Username,
 		Password: configApplyInput.Password,
 	}
@@ -70,7 +72,7 @@ func (p *ldapProvider) testAndApply(actionName string, action *types.Action, req
 		config.ServiceAccountPassword = value
 	}
 
-	caPool, err := newCAPool(config.Certificate)
+	caPool, err := ldap.NewCAPool(config.Certificate)
 	if err != nil {
 		return err
 	}

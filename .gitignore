@@ -6,11 +6,14 @@
 /.trash-cache
 /trash.lock
 /.idea
+/package/data.json
 /package/rancher
+/package/rancher.yaml
 /package/agent
 /tests/MANIFEST
 /tests/integration/MANIFEST
 tests/integration/MANIFEST
+tests/integration/.idea/
 /tests/.cache
 /tests/.tox
 /tests/integration/.tox/
@@ -23,3 +26,9 @@ __pycache__
 /rancher
 *.pytest_cache
 .kube/
+.vscode/
+.DS_Store
+tests/validation/.idea
+all.yaml
+kustomization.yaml
+kontainer-engine

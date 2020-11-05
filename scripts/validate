@@ -1,16 +1,28 @@
 #!/bin/bash
 set -e
 
-cd $(dirname $0)/..
+echo Running: flake8 python linting
 
-echo Running: go fmt	
-test -z "$(go fmt ./... | tee /dev/stderr)"
+cd $(dirname $0)/../tests/integration
+tox -e flake8
 
-echo Running: go vet	
-test -z "$(go vet ./... 2>&1 | tee /dev/stderr)"
+cd ../..
 
-echo Running: golint	
-test -z "$(go list ./... | grep -v /vendor/ | xargs -L1 golint | grep -v 'or be unexported' | tee /dev/stderr)"
+if ! command -v golangci-lint; then	echo Running: go fmt	
+    echo Skipping validation: no golangci-lint available	test -z "$(go fmt ./... | tee /dev/stderr)"
+    exit	
+fi	
 
-echo Running: goimports
-test -z "$(goimports -d $(find . -type f -name '*.go' -not -path "./vendor/*") | tee /dev/stderr)"
+echo Running: golangci-lint
+golangci-lint run
+
+echo Tidying up modules
+go mod tidy
+
+echo Verifying modules
+go mod verify
+
+if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+  echo "Encountered dirty repo!"
+  exit 1
+fi

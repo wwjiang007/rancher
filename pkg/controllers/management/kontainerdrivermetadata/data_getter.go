@@ -1,36 +1,74 @@
 package kontainerdrivermetadata
 
 import (
+	"fmt"
 	"strings"
 
+	"github.com/rancher/rke/types/kdm"
+
 	mVersion "github.com/mcuadros/go-version"
-	"github.com/rancher/rancher/pkg/settings"
-	v3 "github.com/rancher/types/apis/management.cattle.io/v3"
-
-	"github.com/sirupsen/logrus"
-
+	v3 "github.com/rancher/rancher/pkg/generated/norman/management.cattle.io/v3"
 	"github.com/rancher/rancher/pkg/namespace"
+	"github.com/rancher/rancher/pkg/settings"
+	rketypes "github.com/rancher/rke/types"
 	"github.com/rancher/rke/util"
+	"github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func GetRKESystemImages(k8sVersion string, sysImageLister v3.RKEK8sSystemImageLister, sysImages v3.RKEK8sSystemImageInterface) (v3.RKESystemImages, error) {
+func GetCisConfigParams(
+	name string,
+	cisConfigLister v3.CisConfigLister,
+	cisConfig v3.CisConfigInterface,
+) (kdm.CisConfigParams, error) {
+	c, err := cisConfigLister.Get(namespace.GlobalNamespace, name)
+	if err != nil {
+		if !errors.IsNotFound(err) {
+			return kdm.CisConfigParams{}, err
+		}
+		c, err = cisConfig.GetNamespaced(namespace.GlobalNamespace, name, metav1.GetOptions{})
+		if err != nil {
+			return kdm.CisConfigParams{}, err
+		}
+	}
+	return c.Params, nil
+}
+
+func GetCisBenchmarkVersionInfo(
+	name string,
+	cisBenchmarkVersionLister v3.CisBenchmarkVersionLister,
+	cisBenchmarkVersion v3.CisBenchmarkVersionInterface,
+) (kdm.CisBenchmarkVersionInfo, error) {
+	b, err := cisBenchmarkVersionLister.Get(namespace.GlobalNamespace, name)
+	if err != nil {
+		if !errors.IsNotFound(err) {
+			return kdm.CisBenchmarkVersionInfo{}, err
+		}
+		b, err = cisBenchmarkVersion.GetNamespaced(namespace.GlobalNamespace, name, metav1.GetOptions{})
+		if err != nil {
+			return kdm.CisBenchmarkVersionInfo{}, err
+		}
+	}
+	return b.Info, nil
+}
+
+func GetRKESystemImages(k8sVersion string, sysImageLister v3.RkeK8sSystemImageLister, sysImages v3.RkeK8sSystemImageInterface) (rketypes.RKESystemImages, error) {
 	name := k8sVersion
 	sysImage, err := sysImageLister.Get(namespace.GlobalNamespace, name)
 	if err != nil {
 		if !errors.IsNotFound(err) {
-			return v3.RKESystemImages{}, err
+			return rketypes.RKESystemImages{}, err
 		}
 		sysImage, err = sysImages.GetNamespaced(namespace.GlobalNamespace, name, metav1.GetOptions{})
 		if err != nil {
-			return v3.RKESystemImages{}, err
+			return rketypes.RKESystemImages{}, err
 		}
 	}
 	return sysImage.SystemImages, err
 }
 
-func GetRKEAddonTemplate(addonName string, addonLister v3.RKEAddonLister, addons v3.RKEAddonInterface) (string, error) {
+func GetRKEAddonTemplate(addonName string, addonLister v3.RkeAddonLister, addons v3.RkeAddonInterface) (string, error) {
 	addon, err := addonLister.Get(namespace.GlobalNamespace, addonName)
 	if err != nil {
 		if !errors.IsNotFound(err) {
@@ -47,49 +85,68 @@ func GetRKEAddonTemplate(addonName string, addonLister v3.RKEAddonLister, addons
 	return addon.Template, err
 }
 
-func GetRKEK8sServiceOptions(k8sVersion string, svcOptionLister v3.RKEK8sServiceOptionLister, svcOptions v3.RKEK8sServiceOptionInterface) (*v3.KubernetesServicesOptions, error) {
-	names := []string{
-		k8sVersion,
-		util.GetTagMajorVersion(k8sVersion),
-	}
-	var k8sSvcOption *v3.KubernetesServicesOptions
-	for _, name := range names {
-		obj, err := svcOptionLister.Get(namespace.GlobalNamespace, name)
+func getRKEServiceOption(name string, svcOptionLister v3.RkeK8sServiceOptionLister, svcOptions v3.RkeK8sServiceOptionInterface) (*rketypes.KubernetesServicesOptions, error) {
+	var k8sSvcOption *rketypes.KubernetesServicesOptions
+	svcOption, err := svcOptionLister.Get(namespace.GlobalNamespace, name)
+	if err != nil {
+		if !errors.IsNotFound(err) {
+			return k8sSvcOption, err
+		}
+		svcOption, err = svcOptions.GetNamespaced(namespace.GlobalNamespace, name, metav1.GetOptions{})
 		if err != nil {
-			if !errors.IsNotFound(err) {
-				return k8sSvcOption, err
-			}
-			continue
+			return k8sSvcOption, err
 		}
-		if obj.Labels[sendRKELabel] == "false" {
-			logrus.Infof("svcOption false k8sVersion %s", k8sVersion)
-			return k8sSvcOption, nil
-		}
-		return &obj.ServiceOptions, nil
 	}
-
-	for _, name := range names {
-		obj, err := svcOptions.GetNamespaced(namespace.GlobalNamespace, name, metav1.GetOptions{})
-		if err != nil {
-			if !errors.IsNotFound(err) {
-				return k8sSvcOption, err
-			}
-			continue
-		}
-		if obj.Labels[sendRKELabel] == "false" {
-			logrus.Infof("svcOption false k8sVersion %s", k8sVersion)
-			return k8sSvcOption, nil
-		}
-		return &obj.ServiceOptions, nil
+	if svcOption.Labels[sendRKELabel] == "false" {
+		return k8sSvcOption, nil
 	}
-	return k8sSvcOption, nil
+	logrus.Debugf("getRKEServiceOption: sending svcOption %s", name)
+	return &svcOption.ServiceOptions, nil
 }
 
-func GetK8sVersionInfo(rancherVersion string, rkeSysImages map[string]v3.RKESystemImages, svcOptions map[string]v3.KubernetesServicesOptions,
-	rancherVersions map[string]v3.K8sVersionInfo) (map[string]v3.RKESystemImages, map[string]v3.KubernetesServicesOptions) {
+func GetRKEK8sServiceOptions(k8sVersion string, svcOptionLister v3.RkeK8sServiceOptionLister,
+	svcOptions v3.RkeK8sServiceOptionInterface, sysImageLister v3.RkeK8sSystemImageLister,
+	sysImages v3.RkeK8sSystemImageInterface, osType OSType) (*rketypes.KubernetesServicesOptions, error) {
 
-	k8sVersionRKESystemImages := map[string]v3.RKESystemImages{}
-	k8sVersionSvcOptions := map[string]v3.KubernetesServicesOptions{}
+	var k8sSvcOption *rketypes.KubernetesServicesOptions
+	sysImage, err := sysImageLister.Get(namespace.GlobalNamespace, k8sVersion)
+	if err != nil {
+		if !errors.IsNotFound(err) {
+			logrus.Errorf("getSvcOptions: error finding system image for %s %v", k8sVersion, err)
+			return k8sSvcOption, err
+		}
+		sysImage, err = sysImages.GetNamespaced(namespace.GlobalNamespace, k8sVersion, metav1.GetOptions{})
+		if err != nil {
+			logrus.Errorf("getSvcOptions: error finding system image for %s %v", k8sVersion, err)
+			return k8sSvcOption, err
+		}
+	}
+	key := svcOptionLinuxKey
+	if osType == Windows {
+		key = svcOptionWindowsKey
+	}
+	val, ok := sysImage.Labels[key]
+	// It's possible that we have a k8s version with no windows svcOptions. In this case, we just warn and return nil.
+	// if we have in fact windows nodes trying to use that version, the error will show in reknodeconfig server.
+	if !ok && osType == Windows {
+		logrus.Debugf("getSvcOptions: no service-option key present for %s", k8sVersion)
+		return k8sSvcOption, nil
+	} else if !ok {
+		return k8sSvcOption, fmt.Errorf("getSvcOptions: no service-option key present for %s", k8sVersion)
+	}
+	return getRKEServiceOption(val, svcOptionLister, svcOptions)
+}
+
+func GetK8sVersionInfo(
+	rancherVersion string,
+	rkeSysImages map[string]rketypes.RKESystemImages,
+	linuxSvcOptions map[string]rketypes.KubernetesServicesOptions,
+	windowsSvcOptions map[string]rketypes.KubernetesServicesOptions,
+	rancherVersions map[string]rketypes.K8sVersionInfo,
+) (linuxInfo, windowsInfo *VersionInfo) {
+
+	linuxInfo = newVersionInfo()
+	windowsInfo = newVersionInfo()
 
 	maxVersionForMajorK8sVersion := map[string]string{}
 	for k8sVersion := range rkeSysImages {
@@ -105,52 +162,52 @@ func GetK8sVersionInfo(rancherVersion string, rkeSysImages map[string]v3.RKESyst
 		}
 	}
 	for majorVersion, k8sVersion := range maxVersionForMajorK8sVersion {
-		k8sVersionRKESystemImages[k8sVersion] = rkeSysImages[k8sVersion]
-		k8sVersionSvcOptions[k8sVersion] = svcOptions[majorVersion]
+		sysImgs, exist := rkeSysImages[k8sVersion]
+		if !exist {
+			continue
+		}
+		// windows has been supported since v1.14,
+		// the following logic would not find `< v1.14` service options
+		if svcOptions, exist := windowsSvcOptions[majorVersion]; exist {
+			// only keep the related images for windows
+			windowsSysImgs := rketypes.RKESystemImages{
+				NginxProxy:                sysImgs.NginxProxy,
+				CertDownloader:            sysImgs.CertDownloader,
+				KubernetesServicesSidecar: sysImgs.KubernetesServicesSidecar,
+				Kubernetes:                sysImgs.Kubernetes,
+				WindowsPodInfraContainer:  sysImgs.WindowsPodInfraContainer,
+			}
+
+			windowsInfo.RKESystemImages[k8sVersion] = windowsSysImgs
+			windowsInfo.KubernetesServicesOptions[k8sVersion] = svcOptions
+		}
+		if svcOptions, exist := linuxSvcOptions[majorVersion]; exist {
+			// clean the unrelated images for linux
+			sysImgs.WindowsPodInfraContainer = ""
+
+			linuxInfo.RKESystemImages[k8sVersion] = sysImgs
+			linuxInfo.KubernetesServicesOptions[k8sVersion] = svcOptions
+		}
 	}
-	return k8sVersionRKESystemImages, k8sVersionSvcOptions
+
+	return linuxInfo, windowsInfo
 }
 
-func GetRKEK8sServiceOptionsWindows(k8sVersion string, svcOptionLister v3.RKEK8sServiceOptionLister, svcOptions v3.RKEK8sServiceOptionInterface) (*v3.KubernetesServicesOptions, error) {
-	names := []string{
-		getWindowsName(k8sVersion),
-		getWindowsName(util.GetTagMajorVersion(k8sVersion)),
+type VersionInfo struct {
+	RKESystemImages           map[string]rketypes.RKESystemImages
+	KubernetesServicesOptions map[string]rketypes.KubernetesServicesOptions
+}
+
+func newVersionInfo() *VersionInfo {
+	return &VersionInfo{
+		RKESystemImages:           map[string]rketypes.RKESystemImages{},
+		KubernetesServicesOptions: map[string]rketypes.KubernetesServicesOptions{},
 	}
-	var k8sSvcOption *v3.KubernetesServicesOptions
-	for _, name := range names {
-		obj, err := svcOptionLister.Get(namespace.GlobalNamespace, name)
-		if err != nil {
-			if !errors.IsNotFound(err) {
-				return k8sSvcOption, err
-			}
-			continue
-		}
-		if obj.Labels[sendRKELabel] == "false" {
-			logrus.Infof("Windows svcOption false k8sVersion %s", k8sVersion)
-			return k8sSvcOption, nil
-		}
-		return &obj.ServiceOptions, nil
-	}
-	for _, name := range names {
-		obj, err := svcOptions.GetNamespaced(namespace.GlobalNamespace, name, metav1.GetOptions{})
-		if err != nil {
-			if !errors.IsNotFound(err) {
-				return k8sSvcOption, err
-			}
-			continue
-		}
-		if obj.Labels[sendRKELabel] == "false" {
-			logrus.Infof("Windows svcOption false k8sVersion %s", k8sVersion)
-			return k8sSvcOption, nil
-		}
-		return &obj.ServiceOptions, nil
-	}
-	return k8sSvcOption, nil
 }
 
 func GetRancherVersion() string {
 	rancherVersion := settings.ServerVersion.Get()
-	if strings.HasPrefix(rancherVersion, "dev") || strings.HasPrefix(rancherVersion, "master") {
+	if strings.HasPrefix(rancherVersion, "dev") || strings.HasPrefix(rancherVersion, "master") || strings.HasSuffix(rancherVersion, "-head") {
 		return RancherVersionDev
 	}
 	if strings.HasPrefix(rancherVersion, "v") {

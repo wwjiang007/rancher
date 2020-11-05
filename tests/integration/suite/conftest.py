@@ -10,7 +10,8 @@ import json
 import rancher
 from sys import platform
 from .common import random_str, wait_for_template_to_be_created
-from kubernetes.client import ApiClient, Configuration, CustomObjectsApi
+from kubernetes.client import ApiClient, Configuration, CustomObjectsApi, \
+    ApiextensionsV1beta1Api
 from kubernetes.client.rest import ApiException
 from kubernetes.config.kube_config import KubeConfigLoader
 from rancher import ApiError
@@ -41,8 +42,9 @@ IP = get_ip()
 SERVER_URL = 'https://' + IP + ':8443'
 BASE_URL = SERVER_URL + '/v3'
 AUTH_URL = BASE_URL + '-public/localproviders/local?action=login'
-DEFAULT_TIMEOUT = 45
+DEFAULT_TIMEOUT = 120
 DEFAULT_CATALOG = "https://github.com/rancher/integration-test-charts"
+WAIT_HTTP_ERROR_CODES = [404, 405]
 
 
 class ManagementContext:
@@ -128,8 +130,14 @@ def cluster_and_client(cluster_id, mgmt_client):
 
 
 def user_project_client(user, project):
-    """Returns a project level  client for the user"""
+    """Returns a project level client for the user"""
     return rancher.Client(url=project.links.self+'/schemas', verify=False,
+                          token=user.client.token)
+
+
+def user_cluster_client(user, cluster):
+    """Returns a cluster level client for the user"""
+    return rancher.Client(url=cluster.links.self+'/schemas', verify=False,
                           token=user.client.token)
 
 
@@ -369,7 +377,69 @@ def remove_resource(admin_mc, request):
                 if code == 409 and "namespace will automatically be purged " \
                         in e.error.message:
                     pass
-                elif code != 404:
+                elif code not in WAIT_HTTP_ERROR_CODES:
+                    raise e
+        request.addfinalizer(clean)
+    return _cleanup
+
+
+@pytest.fixture
+def remove_resouce_func(request):
+    """Call the delete_func passing in the name of the resource. This is useful
+    when dealing with the k8s clients for objects that don't exist in the
+    Rancher client
+    """
+    def _cleanup(delete_func, name):
+        def clean():
+            try:
+                delete_func(name)
+            except ApiException as e:
+                body = json.loads(e.body)
+                if body["code"] not in WAIT_HTTP_ERROR_CODES:
+                    raise e
+        request.addfinalizer(clean)
+    return _cleanup
+
+
+@pytest.fixture
+def raw_remove_custom_resource(admin_mc, request):
+    """Remove a custom resource, using the k8s client, after a test finishes
+    even if the test fails. This should only be used if remove_resource, which
+    exclusively uses the rancher api, cannot be used"""
+    def _cleanup(resource):
+        k8s_v1beta1_client = ApiextensionsV1beta1Api(admin_mc.k8s_client)
+        k8s_client = CustomObjectsApi(admin_mc.k8s_client)
+
+        def clean():
+            kind = resource["kind"]
+            metadata = resource["metadata"]
+            api_version = resource["apiVersion"]
+            api_version_parts = api_version.split("/")
+            if len(api_version_parts) != 2:
+                raise ValueError("Error parsing ApiVersion [" + api_version
+                                 + "]." + "Expected form \"group/version\""
+                                 )
+
+            group = api_version_parts[0]
+            version = api_version_parts[1]
+
+            crd_list = k8s_v1beta1_client.\
+                list_custom_resource_definition().items
+            crd = list(filter(lambda x: x.spec.names.kind == kind and
+                              x.spec.group == group and
+                              x.spec.version == version,
+                              crd_list))[0]
+            try:
+                k8s_client.delete_namespaced_custom_object(
+                    group,
+                    version,
+                    metadata["namespace"],
+                    crd.spec.names.plural,
+                    metadata["name"],
+                    {})
+            except ApiException as e:
+                body = json.loads(e.body)
+                if body["code"] not in WAIT_HTTP_ERROR_CODES:
                     raise e
         request.addfinalizer(clean)
     return _cleanup
@@ -387,7 +457,7 @@ def remove_resource_session(admin_mc, request):
             try:
                 client.delete(resource)
             except ApiError as e:
-                if e.error.status != 404:
+                if e.error.status not in WAIT_HTTP_ERROR_CODES:
                     raise e
         request.addfinalizer(clean)
     return _cleanup
@@ -408,7 +478,7 @@ def wait_remove_resource(admin_mc, request, timeout=DEFAULT_TIMEOUT):
                 if code == 409 and "namespace will automatically be purged " \
                         in e.error.message:
                     pass
-                elif code != 404:
+                elif code not in WAIT_HTTP_ERROR_CODES:
                     raise e
             wait_until(lambda: client.reload(resource) is None)
         request.addfinalizer(clean)
@@ -426,7 +496,7 @@ def list_remove_resource(admin_mc, request):
                 try:
                     client.delete(item)
                 except ApiError as e:
-                    if e.error.status != 404:
+                    if e.error.status not in WAIT_HTTP_ERROR_CODES:
                         raise e
                 wait_until(lambda: client.reload(item) is None)
         request.addfinalizer(clean)
@@ -542,3 +612,42 @@ def create_kubeconfig(request, dind_cc, client):
     wait_for(cluster_token_available)
 
     return cluster_kubeconfig_file
+
+
+def set_cluster_psp(admin_mc, value):
+    """Enable or Disable the pod security policy at the local cluster"""
+    k8s_dynamic_client = CustomObjectsApi(admin_mc.k8s_client)
+    # these create a mock pspts... not valid for real psp's
+
+    def update_cluster():
+        try:
+            local_cluster = k8s_dynamic_client.get_cluster_custom_object(
+                "management.cattle.io", "v3", "clusters", "local")
+            local_cluster["metadata"]["annotations"][
+                "capabilities/pspEnabled"] = value
+            k8s_dynamic_client.replace_cluster_custom_object(
+                "management.cattle.io", "v3", "clusters", "local",
+                local_cluster)
+        except ApiException as e:
+            assert e.status == 409
+            return False
+        return True
+
+    wait_for(update_cluster)
+
+    def check_psp():
+        cluster_obj = admin_mc.client.by_id_cluster(id="local")
+        return str(cluster_obj.capabilities.pspEnabled).lower() == value
+
+    wait_for(check_psp)
+
+
+@pytest.fixture()
+def restore_cluster_psp(admin_mc, request):
+    cluster_obj = admin_mc.client.by_id_cluster(id="local")
+    value = str(cluster_obj.capabilities.pspEnabled).lower()
+
+    def _restore():
+        set_cluster_psp(admin_mc, value)
+
+    request.addfinalizer(_restore)

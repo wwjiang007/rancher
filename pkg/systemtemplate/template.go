@@ -71,8 +71,22 @@ type: Opaque
 data:
   url: "{{.URL}}"
   token: "{{.Token}}"
+  namespace: "{{.Namespace}}"
 
 ---
+
+{{- if .PrivateRegistryConfig}}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cattle-private-registry
+  namespace: cattle-system
+type: kubernetes.io/dockerconfigjson
+data:
+  .dockerconfigjson: "{{.PrivateRegistryConfig}}"
+
+---
+{{- end }}
 
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -139,6 +153,10 @@ spec:
         - name: cluster-register
           imagePullPolicy: IfNotPresent
           env:
+          - name: CATTLE_FEATURES
+            value: "{{.Features}}"
+          - name: CATTLE_IS_RKE
+            value: "{{.IsRKE}}"
           - name: CATTLE_SERVER
             value: "{{.URLPlain}}"
           - name: CATTLE_CA_CHECKSUM
@@ -152,6 +170,16 @@ spec:
           - name: cattle-credentials
             mountPath: /cattle-credentials
             readOnly: true
+          readinessProbe:
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            httpGet:
+              path: /health
+              port: 8080
+      {{- if .PrivateRegistryConfig}}
+      imagePullSecrets:
+      - name: cattle-private-registry
+      {{- end }}
       volumes:
       - name: cattle-credentials
         secret:
@@ -159,6 +187,8 @@ spec:
           defaultMode: 320
 
 ---
+
+{{ if .IsRKE }}
 
 apiVersion: apps/v1
 kind: DaemonSet
@@ -214,12 +244,18 @@ spec:
           mountPath: /etc/kubernetes
         - name: var-run
           mountPath: /var/run
+          mountPropagation: HostToContainer
         - name: run
           mountPath: /run
+          mountPropagation: HostToContainer
         - name: docker-certs
           mountPath: /etc/docker/certs.d
         securityContext:
           privileged: true
+      {{- if .PrivateRegistryConfig}}
+      imagePullSecrets:
+      - name: cattle-private-registry
+      {{- end }}
       volumes:
       - name: k8s-ssl
         hostPath:
@@ -243,6 +279,10 @@ spec:
         name: docker-certs
   updateStrategy:
     type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 25%
+
+{{- end }}
 
 {{- if .IsWindowsCluster}}
 
@@ -273,12 +313,7 @@ spec:
                     - linux
       serviceAccountName: cattle
       tolerations:
-      - effect: NoExecute
-        key: "node-role.kubernetes.io/etcd"
-        value: "true"
-      - effect: NoSchedule
-        key: "node-role.kubernetes.io/controlplane"
-        value: "true"
+      - operator: Exists
       containers:
       - name: agent
         image: {{.AgentImage}}
@@ -312,6 +347,8 @@ spec:
           mountPath: \\.\pipe\docker_engine
         - name: wins-pipe
           mountPath: \\.\pipe\rancher_wins
+        - name: wins-config
+          mountPath: c:/etc/rancher/wins
       volumes:
       - name: k8s-ssl
         hostPath:
@@ -334,8 +371,14 @@ spec:
       - name: wins-pipe
         hostPath:
           path: \\.\pipe\rancher_wins
+      - name: wins-config
+        hostPath:
+          path: c:/etc/rancher/wins
+          type: DirectoryOrCreate
   updateStrategy:
     type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 25%
 {{- end }}
 
 {{- if .AuthImage}}
@@ -382,6 +425,10 @@ spec:
           mountPath: /etc/kubernetes
         securityContext:
           privileged: true
+      {{- if .PrivateRegistryConfig}}
+      imagePullSecrets:
+      - name: cattle-private-registry
+      {{- end }}
       volumes:
       - name: k8s-ssl
         hostPath:
@@ -389,13 +436,24 @@ spec:
           type: DirectoryOrCreate
   updateStrategy:
     type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 25%
 {{- end }}
 `
 
-var AuthDaemonSet = `
+var (
+	AuthDaemonSet = `
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
     name: kube-api-auth
     namespace: cattle-system
 `
+	NodeAgentDaemonSet = `
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+    name: cattle-node-agent
+    namespace: cattle-system
+`
+)

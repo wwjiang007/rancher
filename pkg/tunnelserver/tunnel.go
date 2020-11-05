@@ -11,24 +11,32 @@ import (
 	"reflect"
 	"strings"
 
+	v32 "github.com/rancher/rancher/pkg/apis/management.cattle.io/v3"
+
 	"github.com/rancher/norman/types/convert"
+	client "github.com/rancher/rancher/pkg/client/generated/management/v3"
+	provisioner "github.com/rancher/rancher/pkg/controllers/management/clusterprovisioner"
+	v3 "github.com/rancher/rancher/pkg/generated/norman/management.cattle.io/v3"
 	"github.com/rancher/rancher/pkg/taints"
+	"github.com/rancher/rancher/pkg/types/config"
 	"github.com/rancher/remotedialer"
-	v3 "github.com/rancher/types/apis/management.cattle.io/v3"
-	client "github.com/rancher/types/client/management/v3"
-	"github.com/rancher/types/config"
+	"github.com/sirupsen/logrus"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/tools/cache"
 )
 
 const (
-	crtKeyIndex    = "crtKeyIndex"
-	nodeKeyIndex   = "nodeKeyIndex"
-	importedDriver = "imported"
+	crtKeyIndex  = "crtKeyIndex"
+	nodeKeyIndex = "nodeKeyIndex"
 
 	Token  = "X-API-Tunnel-Token"
 	Params = "X-API-Tunnel-Params"
+)
+
+var (
+	ErrClusterNotFound = errors.New("cluster not found")
 )
 
 type cluster struct {
@@ -38,8 +46,9 @@ type cluster struct {
 }
 
 type input struct {
-	Node    *client.Node `json:"node"`
-	Cluster *cluster     `json:"cluster"`
+	Node        *client.Node `json:"node"`
+	Cluster     *cluster     `json:"cluster"`
+	NodeVersion int          `json:"nodeVersion"`
 }
 
 func NewTunnelServer(authorizer *Authorizer) *remotedialer.Server {
@@ -48,12 +57,13 @@ func NewTunnelServer(authorizer *Authorizer) *remotedialer.Server {
 
 func NewAuthorizer(context *config.ScaledContext) *Authorizer {
 	auth := &Authorizer{
-		crtIndexer:    context.Management.ClusterRegistrationTokens("").Controller().Informer().GetIndexer(),
-		clusterLister: context.Management.Clusters("").Controller().Lister(),
-		nodeIndexer:   context.Management.Nodes("").Controller().Informer().GetIndexer(),
-		machineLister: context.Management.Nodes("").Controller().Lister(),
-		machines:      context.Management.Nodes(""),
-		clusters:      context.Management.Clusters(""),
+		crtIndexer:            context.Management.ClusterRegistrationTokens("").Controller().Informer().GetIndexer(),
+		clusterLister:         context.Management.Clusters("").Controller().Lister(),
+		nodeIndexer:           context.Management.Nodes("").Controller().Informer().GetIndexer(),
+		machineLister:         context.Management.Nodes("").Controller().Lister(),
+		machines:              context.Management.Nodes(""),
+		clusters:              context.Management.Clusters(""),
+		KontainerDriverLister: context.Management.KontainerDrivers("").Controller().Lister(),
 	}
 	context.Management.ClusterRegistrationTokens("").Controller().Informer().AddIndexers(map[string]cache.IndexFunc{
 		crtKeyIndex: auth.crtIndex,
@@ -65,19 +75,21 @@ func NewAuthorizer(context *config.ScaledContext) *Authorizer {
 }
 
 type Authorizer struct {
-	crtIndexer    cache.Indexer
-	clusterLister v3.ClusterLister
-	nodeIndexer   cache.Indexer
-	machineLister v3.NodeLister
-	machines      v3.NodeInterface
-	clusters      v3.ClusterInterface
+	crtIndexer            cache.Indexer
+	clusterLister         v3.ClusterLister
+	nodeIndexer           cache.Indexer
+	machineLister         v3.NodeLister
+	machines              v3.NodeInterface
+	clusters              v3.ClusterInterface
+	KontainerDriverLister v3.KontainerDriverLister
 }
 
 type Client struct {
-	Cluster *v3.Cluster
-	Node    *v3.Node
-	Token   string
-	Server  string
+	Cluster     *v3.Cluster
+	Node        *v3.Node
+	Token       string
+	Server      string
+	NodeVersion int
 }
 
 func (t *Authorizer) authorizeTunnel(req *http.Request) (string, bool, error) {
@@ -91,20 +103,10 @@ func (t *Authorizer) authorizeTunnel(req *http.Request) (string, bool, error) {
 	return "", false, err
 }
 
-func (t *Authorizer) AuthorizeLocalNode(username, password string) (string, []string, *v3.Cluster, bool) {
-	cluster, err := t.getClusterByToken(password)
-	if err != nil || cluster == nil || cluster.Status.Driver != v3.ClusterDriverLocal {
-		return "", nil, nil, false
-	}
-	if username == "kube-proxy" {
-		return "system:kube-proxy", nil, cluster, true
-	}
-	return "system:node:" + username, []string{"system:nodes"}, cluster, true
-}
-
 func (t *Authorizer) Authorize(req *http.Request) (*Client, bool, error) {
 	token := req.Header.Get(Token)
 	if token == "" {
+		logrus.Debugf("Authorize: Token header [%s] is empty", Token)
 		return nil, false, nil
 	}
 
@@ -132,10 +134,11 @@ func (t *Authorizer) Authorize(req *http.Request) (*Client, bool, error) {
 			node.Status.NodeConfig.Taints = taints.GetRKETaintsFromStrings(input.Node.CustomConfig.Taints)
 		}
 		return &Client{
-			Cluster: cluster,
-			Node:    node,
-			Token:   token,
-			Server:  req.Host,
+			Cluster:     cluster,
+			Node:        node,
+			Token:       token,
+			Server:      req.Host,
+			NodeVersion: input.NodeVersion,
 		}, ok, err
 	}
 
@@ -153,6 +156,7 @@ func (t *Authorizer) Authorize(req *http.Request) (*Client, bool, error) {
 
 func (t *Authorizer) getMachine(cluster *v3.Cluster, inNode *client.Node) (*v3.Node, error) {
 	machineName := machineName(inNode)
+	logrus.Tracef("getMachine: looking up machine [%s] in cluster [%s]", machineName, cluster.Name)
 	machine, err := t.machineLister.Get(cluster.Name, machineName)
 	if apierrors.IsNotFound(err) {
 		if objs, err := t.nodeIndexer.ByIndex(nodeKeyIndex, fmt.Sprintf("%s/%s", cluster.Name, inNode.RequestedHostname)); err == nil {
@@ -161,9 +165,20 @@ func (t *Authorizer) getMachine(cluster *v3.Cluster, inNode *client.Node) (*v3.N
 			}
 		}
 
+		logrus.Tracef("getMachine: looking up [%s] as node name in cluster [%s]", inNode.RequestedHostname, cluster.Name)
 		machine, err := t.machineLister.Get(cluster.Name, inNode.RequestedHostname)
 		if err == nil {
+			logrus.Debugf("Found [%s] as node name in cluster [%s], error: %v", inNode.RequestedHostname, cluster.Name, err)
 			return machine, nil
+		}
+
+		logrus.Tracef("getMachine: looking up [%s] as RequestedHostname in cluster [%s]", inNode.RequestedHostname, cluster.Name)
+		machines, _ := t.machineLister.List(cluster.Name, labels.NewSelector())
+		for _, machine := range machines {
+			logrus.Tracef("getMachine: comparing machine.Spec.RequestedHostname [%s] to inNode.RequestedHostname [%s]", machine.Spec.RequestedHostname, inNode.RequestedHostname)
+			if machine.Spec.RequestedHostname == inNode.RequestedHostname {
+				return machine, nil
+			}
 		}
 	}
 
@@ -212,7 +227,7 @@ func (t *Authorizer) createNode(inNode *client.Node, cluster *v3.Cluster, req *h
 			Name:      name,
 			Namespace: cluster.Name,
 		},
-		Spec: v3.NodeSpec{
+		Spec: v32.NodeSpec{
 			Etcd:              inNode.Etcd,
 			ControlPlane:      inNode.ControlPlane,
 			Worker:            inNode.Worker,
@@ -230,7 +245,7 @@ func (t *Authorizer) updateDockerInfo(machine *v3.Node, inNode *client.Node) (*v
 		return machine, nil
 	}
 
-	dockerInfo := &v3.DockerInfo{}
+	dockerInfo := &v32.DockerInfo{}
 	err := convert.ToObj(inNode.DockerInfo, dockerInfo)
 	if err != nil {
 		return nil, err
@@ -260,13 +275,19 @@ func (t *Authorizer) authorizeCluster(cluster *v3.Cluster, inCluster *cluster, r
 		err error
 	)
 
-	if cluster.Status.Driver != importedDriver && cluster.Status.Driver != "" {
+	if cluster.Status.Driver != v32.ClusterDriverImported && cluster.Status.Driver != "" {
 		return cluster, true, nil
 	}
 
 	changed := false
-	if cluster.Status.Driver == "" {
-		cluster.Status.Driver = importedDriver
+
+	driver, err := provisioner.GetDriver(cluster, t.KontainerDriverLister)
+	if err != nil {
+		return cluster, true, err
+	}
+	if driver == "" {
+		logrus.Tracef("Setting the driver to imported for cluster %v %v", cluster.Name, cluster.Spec.DisplayName)
+		cluster.Status.Driver = v32.ClusterDriverImported
 		changed = true
 	}
 
@@ -274,7 +295,7 @@ func (t *Authorizer) authorizeCluster(cluster *v3.Cluster, inCluster *cluster, r
 	token := inCluster.Token
 	caCert := inCluster.CACert
 
-	if cluster.Status.Driver == importedDriver {
+	if cluster.Status.Driver == v32.ClusterDriverImported {
 		if cluster.Status.APIEndpoint != apiEndpoint ||
 			cluster.Status.ServiceAccountToken != token ||
 			cluster.Status.CACert != caCert {
@@ -330,7 +351,9 @@ func (t *Authorizer) readInput(cluster *v3.Cluster, req *http.Request) (*input, 
 
 func machineName(machine *client.Node) string {
 	digest := md5.Sum([]byte(machine.RequestedHostname))
-	return "m-" + hex.EncodeToString(digest[:])[:12]
+	machineNameMD5 := fmt.Sprintf("m-%s", hex.EncodeToString(digest[:])[:12])
+	logrus.Tracef("machineName: returning [%s] for node with RequestedHostname [%s]", machineNameMD5, machine.RequestedHostname)
+	return machineNameMD5
 }
 
 func (t *Authorizer) getClusterByToken(token string) (*v3.Cluster, error) {
@@ -344,7 +367,7 @@ func (t *Authorizer) getClusterByToken(token string) (*v3.Cluster, error) {
 		return t.clusterLister.Get("", crt.Spec.ClusterName)
 	}
 
-	return nil, errors.New("cluster not found")
+	return nil, ErrClusterNotFound
 }
 
 func (t *Authorizer) crtIndex(obj interface{}) ([]string, error) {
@@ -357,12 +380,12 @@ func (t *Authorizer) nodeIndex(obj interface{}) ([]string, error) {
 	return []string{fmt.Sprintf("%s/%s", node.Namespace, node.Status.NodeName)}, nil
 }
 
-func (t *Authorizer) toCustomConfig(machine *client.Node) *v3.CustomConfig {
+func (t *Authorizer) toCustomConfig(machine *client.Node) *v32.CustomConfig {
 	if machine == nil || machine.CustomConfig == nil {
 		return nil
 	}
 
-	result := &v3.CustomConfig{}
+	result := &v32.CustomConfig{}
 	if err := convert.ToObj(machine.CustomConfig, result); err != nil {
 		return nil
 	}

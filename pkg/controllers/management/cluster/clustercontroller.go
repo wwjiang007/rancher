@@ -2,19 +2,29 @@ package cluster
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
 
+	v32 "github.com/rancher/rancher/pkg/apis/management.cattle.io/v3"
+
+	rketypes "github.com/rancher/rke/types"
+
 	errorsutil "github.com/pkg/errors"
-	"github.com/rancher/kontainer-engine/service"
-	"github.com/rancher/kontainer-engine/types"
+	normantypes "github.com/rancher/norman/types"
+	"github.com/rancher/norman/types/convert"
+	client "github.com/rancher/rancher/pkg/client/generated/project/v3"
 	"github.com/rancher/rancher/pkg/controllers/management/clusterprovisioner"
+	v1 "github.com/rancher/rancher/pkg/generated/norman/core/v1"
+	v3 "github.com/rancher/rancher/pkg/generated/norman/management.cattle.io/v3"
+	"github.com/rancher/rancher/pkg/kontainer-engine/service"
+	"github.com/rancher/rancher/pkg/kontainer-engine/types"
+	managementschema "github.com/rancher/rancher/pkg/schemas/management.cattle.io/v3"
+	"github.com/rancher/rancher/pkg/types/config"
 	"github.com/rancher/rke/cloudprovider/aws"
 	"github.com/rancher/rke/cloudprovider/azure"
-	v1 "github.com/rancher/types/apis/core/v1"
-	v3 "github.com/rancher/types/apis/management.cattle.io/v3"
-	"github.com/rancher/types/config"
 	"github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/labels"
@@ -27,25 +37,26 @@ const (
 	AzureL4LB               = "Azure L4 LB"
 	NginxIngressProvider    = "Nginx"
 	DefaultNodePortRange    = "30000-32767"
+	capabilitiesAnnotation  = "capabilities/"
 )
 
 type controller struct {
 	clusterClient         v3.ClusterInterface
-	clusterLister         v3.ClusterLister
 	nodeLister            v3.NodeLister
 	kontainerDriverLister v3.KontainerDriverLister
 	namespaces            v1.NamespaceInterface
 	coreV1                v1.Interface
+	capabilitiesSchema    *normantypes.Schema
 }
 
 func Register(ctx context.Context, management *config.ManagementContext) {
 	c := controller{
 		clusterClient:         management.Management.Clusters(""),
-		clusterLister:         management.Management.Clusters("").Controller().Lister(),
 		nodeLister:            management.Management.Nodes("").Controller().Lister(),
 		kontainerDriverLister: management.Management.KontainerDrivers("").Controller().Lister(),
 		namespaces:            management.Core.Namespaces(""),
 		coreV1:                management.Core,
+		capabilitiesSchema:    management.Schemas.Schema(&managementschema.Version, client.CapabilitiesType).InternalSchema,
 	}
 
 	c.clusterClient.AddHandler(ctx, "clusterCreateUpdate", c.capsSync)
@@ -60,10 +71,10 @@ func (c *controller) capsSync(key string, cluster *v3.Cluster) (runtime.Object, 
 	if cluster.Spec.ImportedConfig != nil {
 		return nil, nil
 	}
-	capabilities := v3.Capabilities{}
-	capabilities.NodePortRange = DefaultNodePortRange
+	capabilities := v32.Capabilities{}
 
 	if cluster.Spec.RancherKubernetesEngineConfig != nil {
+		capabilities.NodePortRange = DefaultNodePortRange
 		// taint support capability is set in provisioner and update cluster is called, so we should retain the capability here
 		if cluster.Status.Capabilities.TaintSupport != nil && *cluster.Status.Capabilities.TaintSupport {
 			supportsTaints := true
@@ -73,6 +84,7 @@ func (c *controller) capsSync(key string, cluster *v3.Cluster) (runtime.Object, 
 			return nil, err
 		}
 	} else if cluster.Spec.GenericEngineConfig != nil {
+		capabilities.NodePortRange = DefaultNodePortRange
 		driverName, ok := (*cluster.Spec.GenericEngineConfig)["driverName"].(string)
 		if !ok {
 			logrus.Warnf("cluster %v had generic engine config but no driver name, k8s capabilities will "+
@@ -99,8 +111,11 @@ func (c *controller) capsSync(key string, cluster *v3.Cluster) (runtime.Object, 
 		}
 
 		capabilities = toCapabilities(k8sCapabilities)
-	} else {
-		return nil, nil
+	}
+
+	capabilities, err = c.overrideCapabilities(cluster.Annotations, capabilities)
+	if err != nil {
+		return nil, err
 	}
 
 	if !reflect.DeepEqual(capabilities, cluster.Status.Capabilities) {
@@ -109,12 +124,78 @@ func (c *controller) capsSync(key string, cluster *v3.Cluster) (runtime.Object, 
 		if _, err := c.clusterClient.Update(toUpdateCluster); err != nil {
 			return nil, err
 		}
+		return toUpdateCluster, nil
 	}
 
 	return nil, nil
 }
 
-func (c *controller) RKECapabilities(capabilities v3.Capabilities, rkeConfig v3.RancherKubernetesEngineConfig, clusterName string) (v3.Capabilities, error) {
+// overrideCapabilities masks the given Capabilities struct with values extracted from annotations prefixed with
+// "capabilities.cattle.io/"
+func (c *controller) overrideCapabilities(annotations map[string]string, oldCapabilities v32.Capabilities) (v32.Capabilities, error) {
+	capabilities := v32.Capabilities{}
+
+	capabilitiesMap, err := convert.EncodeToMap(oldCapabilities)
+	if err != nil {
+		return capabilities, err
+	}
+
+	var isUpdate bool
+	for annoKey, annoValue := range annotations {
+		if strings.HasPrefix(annoKey, capabilitiesAnnotation) {
+			capability := strings.TrimPrefix(annoKey, capabilitiesAnnotation)
+			val, err := c.parseResourceInterface(capability, annoValue)
+			if err != nil {
+				return capabilities, err
+			}
+			capabilitiesMap[capability] = val
+			isUpdate = true
+		}
+
+	}
+
+	if isUpdate {
+		if err := convert.ToObj(capabilitiesMap, &capabilities); err != nil {
+			return capabilities, err
+		}
+		return capabilities, nil
+	}
+
+	return oldCapabilities, nil
+}
+
+// parseResourceInterface converts a capability annotation to the appropriate type based on given schema.
+// Json format is assumed if type is not bool, string, or integer.
+func (c *controller) parseResourceInterface(key string, annoValue string) (interface{}, error) {
+	resourceField, ok := c.capabilitiesSchema.ResourceFields[key]
+	if resourceField.Nullable && annoValue == "" {
+		return nil, nil
+	}
+
+	if !ok {
+		return nil, fmt.Errorf("resource field [%s] from capabillities annotation not found", key)
+	}
+
+	fieldType := c.capabilitiesSchema.ResourceFields[key].Type
+	switch fieldType {
+	case "string":
+		return annoValue, nil
+	case "boolean":
+		return strconv.ParseBool(annoValue)
+	case "integer":
+		return strconv.Atoi(annoValue)
+	default:
+		var result interface{}
+
+		err := json.Unmarshal([]byte(annoValue), &result)
+		if err != nil {
+			return nil, err
+		}
+		return result, nil
+	}
+}
+
+func (c *controller) RKECapabilities(capabilities v32.Capabilities, rkeConfig rketypes.RancherKubernetesEngineConfig, clusterName string) (v32.Capabilities, error) {
 	switch rkeConfig.CloudProvider.Name {
 	case aws.AWSCloudProviderName:
 		capabilities.LoadBalancerCapabilities = c.L4Capability(true, ElasticLoadBalancer, []string{"TCP"}, true)
@@ -134,18 +215,19 @@ func (c *controller) RKECapabilities(capabilities v3.Capabilities, rkeConfig v3.
 	}
 
 	ingressController := c.IngressCapability(true, rkeConfig.Ingress.Provider)
-	capabilities.IngressCapabilities = []v3.IngressCapabilities{ingressController}
+	capabilities.IngressCapabilities = []v32.IngressCapabilities{ingressController}
 	if rkeConfig.Services.KubeAPI.ServiceNodePortRange != "" {
 		capabilities.NodePortRange = rkeConfig.Services.KubeAPI.ServiceNodePortRange
 	} else if rkeConfig.Services.KubeAPI.ExtraArgs["service-node-port-range"] != "" {
 		capabilities.NodePortRange = rkeConfig.Services.KubeAPI.ExtraArgs["service-node-port-range"]
 	}
+	capabilities.PspEnabled = rkeConfig.Services.KubeAPI.PodSecurityPolicy
 
 	return capabilities, nil
 }
 
-func (c *controller) L4Capability(enabled bool, providerName string, protocols []string, healthCheck bool) v3.LoadBalancerCapabilities {
-	l4lb := v3.LoadBalancerCapabilities{
+func (c *controller) L4Capability(enabled bool, providerName string, protocols []string, healthCheck bool) v32.LoadBalancerCapabilities {
+	l4lb := v32.LoadBalancerCapabilities{
 		Enabled:              &enabled,
 		Provider:             providerName,
 		ProtocolsSupported:   protocols,
@@ -154,9 +236,9 @@ func (c *controller) L4Capability(enabled bool, providerName string, protocols [
 	return l4lb
 }
 
-func (c *controller) IngressCapability(httpLBEnabled bool, providerName string) v3.IngressCapabilities {
+func (c *controller) IngressCapability(httpLBEnabled bool, providerName string) v32.IngressCapabilities {
 	customDefaultBackendDisabled := false
-	ing := v3.IngressCapabilities{
+	ing := v32.IngressCapabilities{
 		IngressProvider: providerName,
 	}
 	if strings.EqualFold(providerName, NginxIngressProvider) {
@@ -165,19 +247,19 @@ func (c *controller) IngressCapability(httpLBEnabled bool, providerName string) 
 	return ing
 }
 
-func toCapabilities(k8sCapabilities *types.K8SCapabilities) v3.Capabilities {
-	var controllers []v3.IngressCapabilities
+func toCapabilities(k8sCapabilities *types.K8SCapabilities) v32.Capabilities {
+	var controllers []v32.IngressCapabilities
 
 	for _, controller := range k8sCapabilities.IngressControllers {
-		controllers = append(controllers, v3.IngressCapabilities{
+		controllers = append(controllers, v32.IngressCapabilities{
 			CustomDefaultBackend: &controller.CustomDefaultBackend,
 			IngressProvider:      controller.IngressProvider,
 		})
 	}
 
-	return v3.Capabilities{
+	return v32.Capabilities{
 		IngressCapabilities: controllers,
-		LoadBalancerCapabilities: v3.LoadBalancerCapabilities{
+		LoadBalancerCapabilities: v32.LoadBalancerCapabilities{
 			Enabled:              &k8sCapabilities.L4LoadBalancer.Enabled,
 			HealthCheckSupported: k8sCapabilities.L4LoadBalancer.HealthCheckSupported,
 			ProtocolsSupported:   k8sCapabilities.L4LoadBalancer.ProtocolsSupported,

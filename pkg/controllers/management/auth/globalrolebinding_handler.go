@@ -1,14 +1,18 @@
 package auth
 
 import (
+	"fmt"
 	"reflect"
 
 	"github.com/pkg/errors"
+	"github.com/rancher/norman/httperror"
 	"github.com/rancher/norman/types/slice"
+	"github.com/rancher/rancher/pkg/clustermanager"
+	v3 "github.com/rancher/rancher/pkg/generated/norman/management.cattle.io/v3"
+	rbacv1 "github.com/rancher/rancher/pkg/generated/norman/rbac.authorization.k8s.io/v1"
 	"github.com/rancher/rancher/pkg/namespace"
-	v3 "github.com/rancher/types/apis/management.cattle.io/v3"
-	rbacv1 "github.com/rancher/types/apis/rbac.authorization.k8s.io/v1"
-	"github.com/rancher/types/config"
+	"github.com/rancher/rancher/pkg/rbac"
+	"github.com/rancher/rancher/pkg/types/config"
 	"github.com/sirupsen/logrus"
 	v1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -18,24 +22,26 @@ import (
 
 var (
 	globalRoleBindingLabel = map[string]string{"authz.management.cattle.io/globalrolebinding": "true"}
-	crbNameAnnotation      = "authz.management.cattle.io/crb-name"
-	crbNamePrefix          = "cattle-globalrolebinding-"
-	grbController          = "mgmt-auth-grb-controller"
 )
 
 const (
-	globalCatalogRole                  = "global-catalog"
-	globalCatalogRoleBinding           = "global-catalog-binding"
-	templateResourceRule               = "templates"
-	templateVersionResourceRule        = "templateversions"
 	catalogTemplateResourceRule        = "catalogtemplates"
 	catalogTemplateVersionResourceRule = "catalogtemplateversions"
+	crbNameAnnotation                  = "authz.management.cattle.io/crb-name"
+	crbNamePrefix                      = "cattle-globalrolebinding-"
+	globalCatalogRole                  = "global-catalog"
+	globalCatalogRoleBinding           = "global-catalog-binding"
+	grbController                      = "mgmt-auth-grb-controller"
+	templateResourceRule               = "templates"
+	templateVersionResourceRule        = "templateversions"
 )
 
-func newGlobalRoleBindingLifecycle(management *config.ManagementContext) *globalRoleBindingLifecycle {
+func newGlobalRoleBindingLifecycle(management *config.ManagementContext, clusterManager *clustermanager.Manager) *globalRoleBindingLifecycle {
 	return &globalRoleBindingLifecycle{
-		crbLister:         management.RBAC.ClusterRoleBindings("").Controller().Lister(),
+		clusters:          management.Management.Clusters(""),
+		clusterManager:    clusterManager,
 		crbClient:         management.RBAC.ClusterRoleBindings(""),
+		crbLister:         management.RBAC.ClusterRoleBindings("").Controller().Lister(),
 		grLister:          management.Management.GlobalRoles("").Controller().Lister(),
 		roles:             management.RBAC.Roles(""),
 		roleLister:        management.RBAC.Roles("").Controller().Lister(),
@@ -45,9 +51,11 @@ func newGlobalRoleBindingLifecycle(management *config.ManagementContext) *global
 }
 
 type globalRoleBindingLifecycle struct {
+	clusters          v3.ClusterInterface
+	clusterManager    *clustermanager.Manager
+	crbClient         rbacv1.ClusterRoleBindingInterface
 	crbLister         rbacv1.ClusterRoleBindingLister
 	grLister          v3.GlobalRoleLister
-	crbClient         rbacv1.ClusterRoleBindingInterface
 	roles             rbacv1.RoleInterface
 	roleLister        rbacv1.RoleLister
 	roleBindings      rbacv1.RoleBindingInterface
@@ -61,12 +69,62 @@ func (grb *globalRoleBindingLifecycle) Create(obj *v3.GlobalRoleBinding) (runtim
 
 func (grb *globalRoleBindingLifecycle) Updated(obj *v3.GlobalRoleBinding) (runtime.Object, error) {
 	err := grb.reconcileGlobalRoleBinding(obj)
-	return nil, err
+	return obj, err
 }
 
 func (grb *globalRoleBindingLifecycle) Remove(obj *v3.GlobalRoleBinding) (runtime.Object, error) {
+	if obj.GlobalRoleName == rbac.GlobalAdmin || obj.GlobalRoleName == rbac.GlobalRestrictedAdmin {
+		return obj, grb.deleteAdminBinding(obj)
+	}
 	// Don't need to delete the created ClusterRole because owner reference will take care of that
-	return nil, nil
+	return obj, nil
+}
+
+func (grb *globalRoleBindingLifecycle) deleteAdminBinding(obj *v3.GlobalRoleBinding) error {
+	// Explicit API call to ensure we have the most recent cluster info when deleting admin bindings
+	clusters, err := grb.clusters.List(metav1.ListOptions{})
+	if err != nil {
+		return err
+	}
+
+	// Collect all the errors to delete as many user context bindings as possible
+	var allErrors []error
+
+	for _, cluster := range clusters.Items {
+		userContext, err := grb.clusterManager.UserContext(cluster.Name)
+		if err != nil {
+			// ClusterUnavailable error indicates the record can't talk to the downstream cluster
+			if !IsClusterUnavailable(err) {
+				allErrors = append(allErrors, err)
+			}
+			continue
+		}
+
+		bindingName := rbac.GrbCRBName(obj)
+		b, err := userContext.RBAC.ClusterRoleBindings("").Controller().Lister().Get("", bindingName)
+		if err != nil {
+			// User context clusterRoleBinding doesn't exist
+			if !apierrors.IsNotFound(err) {
+				allErrors = append(allErrors, err)
+			}
+			continue
+		}
+
+		err = userContext.RBAC.ClusterRoleBindings("").Delete(b.Name, &metav1.DeleteOptions{})
+		if err != nil {
+			// User context clusterRoleBinding doesn't exist
+			if !apierrors.IsNotFound(err) {
+				allErrors = append(allErrors, err)
+			}
+			continue
+		}
+
+	}
+
+	if len(allErrors) > 0 {
+		return fmt.Errorf("errors deleting admin global role binding: %v", allErrors)
+	}
+	return nil
 }
 
 func (grb *globalRoleBindingLifecycle) reconcileGlobalRoleBinding(globalRoleBinding *v3.GlobalRoleBinding) error {
@@ -74,11 +132,8 @@ func (grb *globalRoleBindingLifecycle) reconcileGlobalRoleBinding(globalRoleBind
 	if !ok {
 		crbName = crbNamePrefix + globalRoleBinding.Name
 	}
-	subject := v1.Subject{
-		Kind:     "User",
-		Name:     globalRoleBinding.UserName,
-		APIGroup: rbacv1.GroupName,
-	}
+
+	subject := rbac.GetGRBSubject(globalRoleBinding)
 	crb, _ := grb.crbLister.Get("", crbName)
 	if crb != nil {
 		subjects := []v1.Subject{subject}
@@ -203,7 +258,7 @@ func (grb *globalRoleBindingLifecycle) addRulesForTemplateAndTemplateVersions(gl
 		rules = append(rules, *catalogTemplateVersionRule)
 	}
 	if len(rules) > 0 {
-		_, err := grb.roles.GetNamespaced(namespace.GlobalNamespace, globalCatalogRole, metav1.GetOptions{})
+		_, err := grb.roleLister.Get(namespace.GlobalNamespace, globalCatalogRole)
 		if err != nil {
 			if apierrors.IsNotFound(err) {
 				role := &v1.Role{
@@ -224,7 +279,7 @@ func (grb *globalRoleBindingLifecycle) addRulesForTemplateAndTemplateVersions(gl
 		// Create a rolebinding, referring the above role, and using globalrole user.Username as the subject
 		// Check if rb exists first!
 		grbName := globalRoleBinding.UserName + "-" + globalCatalogRoleBinding
-		_, err = grb.roleBindings.GetNamespaced(namespace.GlobalNamespace, grbName, metav1.GetOptions{})
+		_, err = grb.roleBindingLister.Get(namespace.GlobalNamespace, grbName)
 		if err != nil {
 			if apierrors.IsNotFound(err) {
 				rb := &v1.RoleBinding{
@@ -248,4 +303,11 @@ func (grb *globalRoleBindingLifecycle) addRulesForTemplateAndTemplateVersions(gl
 		}
 	}
 	return nil
+}
+
+func IsClusterUnavailable(err error) bool {
+	if apiError, ok := err.(*httperror.APIError); ok {
+		return apiError.Code == httperror.ClusterUnavailable
+	}
+	return false
 }

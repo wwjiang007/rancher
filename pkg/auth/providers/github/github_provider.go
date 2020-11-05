@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 
+	v32 "github.com/rancher/rancher/pkg/apis/management.cattle.io/v3"
+
 	"github.com/mitchellh/mapstructure"
 	"github.com/pkg/errors"
 	"github.com/rancher/norman/httperror"
@@ -14,13 +16,13 @@ import (
 	"github.com/rancher/norman/types/convert"
 	"github.com/rancher/rancher/pkg/auth/providers/common"
 	"github.com/rancher/rancher/pkg/auth/tokens"
-	corev1 "github.com/rancher/types/apis/core/v1"
-	v3 "github.com/rancher/types/apis/management.cattle.io/v3"
-	"github.com/rancher/types/apis/management.cattle.io/v3public"
-	client "github.com/rancher/types/client/management/v3"
-	publicclient "github.com/rancher/types/client/management/v3public"
-	"github.com/rancher/types/config"
-	"github.com/rancher/types/user"
+	util2 "github.com/rancher/rancher/pkg/auth/util"
+	client "github.com/rancher/rancher/pkg/client/generated/management/v3"
+	publicclient "github.com/rancher/rancher/pkg/client/generated/management/v3public"
+	corev1 "github.com/rancher/rancher/pkg/generated/norman/core/v1"
+	v3 "github.com/rancher/rancher/pkg/generated/norman/management.cattle.io/v3"
+	"github.com/rancher/rancher/pkg/types/config"
+	"github.com/rancher/rancher/pkg/user"
 	"github.com/sirupsen/logrus"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -70,7 +72,7 @@ func (g *ghProvider) TransformToAuthProvider(authConfig map[string]interface{}) 
 	return p, nil
 }
 
-func (g *ghProvider) getGithubConfigCR() (*v3.GithubConfig, error) {
+func (g *ghProvider) getGithubConfigCR() (*v32.GithubConfig, error) {
 	authConfigObj, err := g.authConfigs.ObjectClient().UnstructuredClient().Get(Name, metav1.GetOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to retrieve GithubConfig, error: %v", err)
@@ -81,7 +83,7 @@ func (g *ghProvider) getGithubConfigCR() (*v3.GithubConfig, error) {
 	}
 	storedGithubConfigMap := u.UnstructuredContent()
 
-	storedGithubConfig := &v3.GithubConfig{}
+	storedGithubConfig := &v32.GithubConfig{}
 	mapstructure.Decode(storedGithubConfigMap, storedGithubConfig)
 
 	metadataMap, ok := storedGithubConfigMap["metadata"].(map[string]interface{})
@@ -94,17 +96,26 @@ func (g *ghProvider) getGithubConfigCR() (*v3.GithubConfig, error) {
 	storedGithubConfig.ObjectMeta = *typemeta
 
 	if storedGithubConfig.ClientSecret != "" {
-		value, err := common.ReadFromSecret(g.secrets, storedGithubConfig.ClientSecret, strings.ToLower(client.GithubConfigFieldClientSecret))
+		data, err := common.ReadFromSecretData(g.secrets, storedGithubConfig.ClientSecret)
 		if err != nil {
 			return nil, err
 		}
-		storedGithubConfig.ClientSecret = value
+		for k, v := range data {
+			if strings.EqualFold(k, client.GithubConfigFieldClientSecret) {
+				storedGithubConfig.ClientSecret = string(v)
+			} else {
+				if storedGithubConfig.AdditionalClientIDs == nil {
+					storedGithubConfig.AdditionalClientIDs = map[string]string{}
+				}
+				storedGithubConfig.AdditionalClientIDs[k] = strings.TrimSpace(string(v))
+			}
+		}
 	}
 
 	return storedGithubConfig, nil
 }
 
-func (g *ghProvider) saveGithubConfig(config *v3.GithubConfig) error {
+func (g *ghProvider) saveGithubConfig(config *v32.GithubConfig) error {
 	storedGithubConfig, err := g.getGithubConfigCR()
 	if err != nil {
 		return err
@@ -130,14 +141,37 @@ func (g *ghProvider) saveGithubConfig(config *v3.GithubConfig) error {
 }
 
 func (g *ghProvider) AuthenticateUser(ctx context.Context, input interface{}) (v3.Principal, []v3.Principal, string, error) {
-	login, ok := input.(*v3public.GithubLogin)
+	login, ok := input.(*v32.GithubLogin)
 	if !ok {
 		return v3.Principal{}, nil, "", errors.New("unexpected input type")
 	}
-	return g.LoginUser(login, nil, false)
+	host := ""
+	req, ok := ctx.Value(util2.RequestKey).(*http.Request)
+	if ok {
+		host = util2.GetHost(req)
+	}
+	return g.LoginUser(host, login, nil, false)
 }
 
-func (g *ghProvider) LoginUser(githubCredential *v3public.GithubLogin, config *v3.GithubConfig, test bool) (v3.Principal, []v3.Principal, string, error) {
+func choseClientID(host string, config *v32.GithubConfig) *v32.GithubConfig {
+	if host == "" {
+		return config
+	}
+
+	clientID := config.HostnameToClientID[host]
+	secretID := config.AdditionalClientIDs[clientID]
+	if secretID == "" {
+		return config
+	}
+
+	copy := *config
+	copy.ClientID = clientID
+	copy.ClientSecret = secretID
+
+	return &copy
+}
+
+func (g *ghProvider) LoginUser(host string, githubCredential *v32.GithubLogin, config *v32.GithubConfig, test bool) (v3.Principal, []v3.Principal, string, error) {
 	var groupPrincipals []v3.Principal
 	var userPrincipal v3.Principal
 	var err error
@@ -149,6 +183,7 @@ func (g *ghProvider) LoginUser(githubCredential *v3public.GithubLogin, config *v
 		}
 	}
 
+	config = choseClientID(host, config)
 	securityCode := githubCredential.Code
 
 	accessToken, err := g.githubClient.getAccessToken(securityCode, config)
@@ -203,7 +238,7 @@ func (g *ghProvider) LoginUser(githubCredential *v3public.GithubLogin, config *v
 func (g *ghProvider) RefetchGroupPrincipals(principalID string, secret string) ([]v3.Principal, error) {
 	var groupPrincipals []v3.Principal
 	var err error
-	var config *v3.GithubConfig
+	var config *v32.GithubConfig
 
 	if config == nil {
 		config, err = g.getGithubConfigCR()

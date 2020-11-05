@@ -2,17 +2,22 @@ package common
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
+	"time"
 
+	"github.com/mitchellh/mapstructure"
 	"github.com/pkg/errors"
 	"github.com/rancher/norman/types"
 	"github.com/rancher/norman/types/convert"
+	client "github.com/rancher/rancher/pkg/client/generated/project/v3"
+	v1 "github.com/rancher/rancher/pkg/generated/norman/core/v1"
+	v3 "github.com/rancher/rancher/pkg/generated/norman/project.cattle.io/v3"
 	"github.com/rancher/rancher/pkg/pipeline/remote"
 	"github.com/rancher/rancher/pkg/pipeline/utils"
 	"github.com/rancher/rancher/pkg/ref"
-	v3 "github.com/rancher/types/apis/project.cattle.io/v3"
-	client "github.com/rancher/types/client/project/v3"
 	uuid "github.com/satori/go.uuid"
+	corev1 "k8s.io/api/core/v1"
 	apierror "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -32,6 +37,8 @@ type BaseProvider struct {
 	SourceCodeRepositories     v3.SourceCodeRepositoryInterface
 	Pipelines                  v3.PipelineInterface
 	PipelineExecutions         v3.PipelineExecutionInterface
+	NamespaceLister            v1.NamespaceLister
+	Namespaces                 v1.NamespaceInterface
 
 	PipelineIndexer             cache.Indexer
 	PipelineExecutionIndexer    cache.Indexer
@@ -144,6 +151,21 @@ func (b BaseProvider) AuthAddAccount(userID string, code string, config interfac
 	account.Namespace = userID
 	account.Spec.UserName = userID
 	account.Spec.ProjectName = projectID
+
+	if _, err := b.NamespaceLister.Get("", userID); err != nil {
+		if !apierror.IsNotFound(err) {
+			return nil, err
+		}
+		_, err := b.Namespaces.Create(
+			&corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: userID,
+				},
+			})
+		if err != nil {
+			return nil, err
+		}
+	}
 	_, err = b.SourceCodeCredentials.Create(account)
 	if apierror.IsAlreadyExists(err) {
 		exist, err := b.SourceCodeCredentialLister.Get(userID, account.Name)
@@ -201,6 +223,33 @@ func (b BaseProvider) RefreshReposByCredentialAndConfig(credential *v3.SourceCod
 	}
 
 	return repos, nil
+}
+
+func ObjectMetaFromUnstructureContent(unstructuredContent map[string]interface{}) (*metav1.ObjectMeta, error) {
+	metadataMap, ok := unstructuredContent["metadata"].(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("failed to retrieve metadata, cannot read k8s unstructured data")
+	}
+
+	objectMeta := &metav1.ObjectMeta{}
+	stringToTimeHook := func(f reflect.Type, t reflect.Type, data interface{}) (interface{}, error) {
+		if f.Kind() == reflect.String && t == reflect.TypeOf(metav1.Time{}) {
+			time, err := time.Parse(time.RFC3339, data.(string))
+			return metav1.Time{Time: time}, err
+		}
+		return data, nil
+	}
+	decoder, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{
+		DecodeHook: stringToTimeHook,
+		Result:     objectMeta,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err := decoder.Decode(metadataMap); err != nil {
+		return nil, fmt.Errorf("failed to decode metadata, error: %v", err)
+	}
+	return objectMeta, nil
 }
 
 func normalizeName(name string) string {

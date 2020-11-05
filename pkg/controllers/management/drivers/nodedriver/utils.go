@@ -7,35 +7,16 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/docker/machine/libmachine/drivers/plugin/localbinary"
-	rpcdriver "github.com/docker/machine/libmachine/drivers/rpc"
-	cli "github.com/docker/machine/libmachine/mcnflag"
-	v3 "github.com/rancher/types/apis/management.cattle.io/v3"
+	v32 "github.com/rancher/rancher/pkg/apis/management.cattle.io/v3"
+
+	"github.com/rancher/machine/libmachine/drivers/plugin/localbinary"
+	rpcdriver "github.com/rancher/machine/libmachine/drivers/rpc"
+	cli "github.com/rancher/machine/libmachine/mcnflag"
 	"github.com/sirupsen/logrus"
 )
 
-var (
-	// secretFields lists all the hard-coded fields that should hidden as password
-	secretFields = map[string]struct{}{
-		// ec2
-		"secretKey": {},
-		// digitalOcean
-		"accessToken": {},
-		// azure
-		"clientSecret": {},
-		// packet, rackspace, softlayer
-		"apiKey": {},
-		// vSphere, openstack, vmwarevcloudair
-		"password": {},
-		// exoscale
-		"apiSecretKey": {},
-		// otc
-		"accessKeySecret": {},
-	}
-)
-
-func FlagToField(flag cli.Flag) (string, v3.Field, error) {
-	field := v3.Field{
+func FlagToField(flag cli.Flag) (string, v32.Field, error) {
+	field := v32.Field{
 		Create: true,
 		Update: true,
 		Type:   "string",
@@ -48,9 +29,6 @@ func FlagToField(flag cli.Flag) (string, v3.Field, error) {
 
 	switch v := flag.(type) {
 	case *cli.StringFlag:
-		if isPassword(name) {
-			field.Type = "password"
-		}
 		field.Description = v.Usage
 		field.Default.StringValue = v.Value
 	case *cli.IntFlag:
@@ -65,6 +43,7 @@ func FlagToField(flag cli.Flag) (string, v3.Field, error) {
 	case *cli.StringSliceFlag:
 		field.Type = "array[string]"
 		field.Description = v.Usage
+		field.Nullable = true
 		field.Default.StringSliceValue = v.Value
 	case *BoolPointerFlag:
 		field.Type = "boolean"
@@ -74,11 +53,6 @@ func FlagToField(flag cli.Flag) (string, v3.Field, error) {
 	}
 
 	return name, field, nil
-}
-
-func isPassword(key string) bool {
-	_, ok := secretFields[key]
-	return ok
 }
 
 func ToLowerCamelCase(nodeFlagName string) (string, error) {

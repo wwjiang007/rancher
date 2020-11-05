@@ -13,14 +13,16 @@ import (
 	"strings"
 	"time"
 
+	v32 "github.com/rancher/rancher/pkg/apis/project.cattle.io/v3"
+
 	"github.com/google/go-querystring/query"
 	"github.com/pkg/errors"
 	"github.com/rancher/norman/httperror"
+	v3 "github.com/rancher/rancher/pkg/generated/norman/project.cattle.io/v3"
 	"github.com/rancher/rancher/pkg/pipeline/remote/model"
 	"github.com/rancher/rancher/pkg/pipeline/utils"
 	"github.com/rancher/rancher/pkg/ref"
 	"github.com/rancher/rancher/pkg/settings"
-	v3 "github.com/rancher/types/apis/project.cattle.io/v3"
 	"github.com/sirupsen/logrus"
 	"github.com/tomnomnom/linkheader"
 	"github.com/xanzy/go-gitlab"
@@ -47,7 +49,7 @@ type client struct {
 	API          string
 }
 
-func New(config *v3.GitlabPipelineConfig) (model.Remote, error) {
+func New(config *v32.GitlabPipelineConfig) (model.Remote, error) {
 	if config == nil {
 		return nil, errors.New("empty gitlab config")
 	}
@@ -91,7 +93,7 @@ func (c *client) Login(code string) (*v3.SourceCodeCredential, error) {
 	token, err := gitlabOauthConfig.Exchange(oauth2.NoContext, code)
 	if err != nil {
 		return nil, err
-	} else if token.TokenType != "bearer" || token.AccessToken == "" {
+	} else if strings.ToLower(token.TokenType) != "bearer" || token.AccessToken == "" {
 		return nil, fmt.Errorf("Fail to get accesstoken with oauth config")
 	}
 	return c.GetAccount(token.AccessToken)

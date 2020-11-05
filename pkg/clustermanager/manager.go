@@ -13,19 +13,29 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pkg/errors"
+	"github.com/rancher/wrangler/pkg/ratelimit"
+
+	v32 "github.com/rancher/rancher/pkg/apis/management.cattle.io/v3"
+
+	"github.com/rancher/lasso/pkg/controller"
 	"github.com/rancher/norman/httperror"
 	"github.com/rancher/norman/types"
-	clusterController "github.com/rancher/rancher/pkg/controllers/user"
+	"github.com/rancher/rancher/pkg/clusterrouter"
+	clusterController "github.com/rancher/rancher/pkg/controllers/managementuser"
+	v3 "github.com/rancher/rancher/pkg/generated/norman/management.cattle.io/v3"
 	"github.com/rancher/rancher/pkg/rbac"
+	"github.com/rancher/rancher/pkg/settings"
+	"github.com/rancher/rancher/pkg/types/config"
+	"github.com/rancher/rancher/pkg/types/config/dialer"
 	"github.com/rancher/rke/pki/cert"
-	v3 "github.com/rancher/types/apis/management.cattle.io/v3"
-	"github.com/rancher/types/config"
-	"github.com/rancher/types/config/dialer"
+	"github.com/rancher/steve/pkg/accesscontrol"
+	rbacv1 "github.com/rancher/wrangler/pkg/generated/controllers/rbac/v1"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/sync/semaphore"
 	"k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	authv1 "k8s.io/client-go/kubernetes/typed/authorization/v1"
 	"k8s.io/client-go/rest"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
@@ -37,7 +47,9 @@ type Manager struct {
 	clusters      v3.ClusterInterface
 	controllers   sync.Map
 	accessControl types.AccessControl
+	rbac          rbacv1.Interface
 	dialer        dialer.Factory
+	startSem      *semaphore.Weighted
 }
 
 type record struct {
@@ -51,13 +63,14 @@ type record struct {
 	cancel        context.CancelFunc
 }
 
-func NewManager(httpsPort int, context *config.ScaledContext) *Manager {
+func NewManager(httpsPort int, context *config.ScaledContext, rbacControllers rbacv1.Interface, asl accesscontrol.AccessSetLookup) *Manager {
 	return &Manager{
 		httpsPort:     httpsPort,
 		ScaledContext: context,
-		accessControl: rbac.NewAccessControl(context.RBAC),
+		accessControl: rbac.NewAccessControlWithASL("", rbacControllers, asl),
 		clusterLister: context.Management.Clusters("").Controller().Lister(),
 		clusters:      context.Management.Clusters(""),
+		startSem:      semaphore.NewWeighted(int64(settings.ClusterControllerStartCount.GetInt())),
 	}
 }
 
@@ -96,8 +109,8 @@ func (m *Manager) RESTConfig(cluster *v3.Cluster) (rest.Config, error) {
 
 func (m *Manager) markUnavailable(clusterName string) {
 	if cluster, err := m.clusters.Get(clusterName, v1.GetOptions{}); err == nil {
-		if !v3.ClusterConditionReady.IsFalse(cluster) {
-			v3.ClusterConditionReady.False(cluster)
+		if !v32.ClusterConditionReady.IsFalse(cluster) {
+			v32.ClusterConditionReady.False(cluster)
 			m.clusters.Update(cluster)
 		}
 		m.Stop(cluster)
@@ -134,20 +147,17 @@ func (m *Manager) startController(r *record, controllers, clusterOwner bool) err
 	if !controllers {
 		return nil
 	}
-	// Prior to k8s v1.14, we simply did a DiscoveryClient.Version() check to see if the user cluster is alive
-	// As of k8s v1.14, kubeapi returns a successfull version response even if etcd is not available.
-	// To work around this, now we try to get a namespace from the API, even if not found, it means the API is up.
-	if _, err := r.cluster.K8sClient.CoreV1().Namespaces().Get("kube-system", v1.GetOptions{}); err != nil && !apierrors.IsNotFound(err) {
-		return errors.Wrapf(err, "failed to contact server")
-	}
 
 	r.Lock()
 	defer r.Unlock()
 	if !r.started {
-		if err := m.doStart(r, clusterOwner); err != nil {
-			m.Stop(r.clusterRec)
-			return err
-		}
+		go func() {
+			if err := m.doStart(r, clusterOwner); err != nil {
+				logrus.Errorf("failed to start cluster controllers %s: %v", r.cluster.ClusterName, err)
+				m.markUnavailable(r.clusterRec.Name)
+				m.Stop(r.clusterRec)
+			}
+		}()
 		r.started = true
 		r.owner = clusterOwner
 	}
@@ -177,23 +187,57 @@ func (m *Manager) doStart(rec *record, clusterOwner bool) (exit error) {
 		}
 	}()
 
+	for i := 0; ; i++ {
+		// Prior to k8s v1.14, we simply did a DiscoveryClient.Version() check to see if the user cluster is alive
+		// As of k8s v1.14, kubeapi returns a successful version response even if etcd is not available.
+		// To work around this, now we try to get a namespace from the API, even if not found, it means the API is up.
+		if _, err := rec.cluster.K8sClient.CoreV1().Namespaces().Get(rec.ctx, "kube-system", v1.GetOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			if i == 2 {
+				m.markUnavailable(rec.cluster.ClusterName)
+			}
+			select {
+			case <-rec.ctx.Done():
+				return rec.ctx.Err()
+			case <-time.After(5 * time.Second):
+				continue
+			}
+		}
+
+		break
+	}
+
+	if err := m.startSem.Acquire(rec.ctx, 1); err != nil {
+		return err
+	}
+	defer m.startSem.Release(1)
+
+	transaction := controller.NewHandlerTransaction(rec.ctx)
 	if clusterOwner {
-		if err := clusterController.Register(rec.ctx, rec.cluster, rec.clusterRec, m, m); err != nil {
+		if err := clusterController.Register(transaction, rec.cluster, rec.clusterRec, m); err != nil {
+			transaction.Rollback()
 			return err
 		}
 	} else {
-		if err := clusterController.RegisterFollower(rec.ctx, rec.cluster, m, m); err != nil {
+		if err := clusterController.RegisterFollower(transaction, rec.cluster, m, m); err != nil {
+			transaction.Rollback()
 			return err
 		}
 	}
 
 	done := make(chan error, 1)
 	go func() {
-		done <- rec.cluster.Start(rec.ctx)
+		defer close(done)
+		err := rec.cluster.Start(rec.ctx)
+		if err == nil {
+			transaction.Commit()
+		} else {
+			transaction.Rollback()
+		}
+		done <- err
 	}()
 
 	select {
-	case <-time.After(30 * time.Second):
+	case <-time.After(10 * time.Minute):
 		rec.cancel()
 		return fmt.Errorf("timeout syncing controllers")
 	case err := <-done:
@@ -211,14 +255,14 @@ func ToRESTConfig(cluster *v3.Cluster, context *config.ScaledContext) (*rest.Con
 	}
 
 	if cluster.Spec.Internal {
-		return context.LocalConfig, nil
+		return &context.RESTConfig, nil
 	}
 
 	if cluster.Status.APIEndpoint == "" || cluster.Status.CACert == "" || cluster.Status.ServiceAccountToken == "" {
 		return nil, nil
 	}
 
-	if !v3.ClusterConditionProvisioned.IsTrue(cluster) {
+	if !v32.ClusterConditionProvisioned.IsTrue(cluster) {
 		return nil, nil
 	}
 
@@ -237,8 +281,8 @@ func ToRESTConfig(cluster *v3.Cluster, context *config.ScaledContext) (*rest.Con
 		return nil, err
 	}
 
-	var tlsDialer dialer.Dialer
-	if cluster.Status.Driver == v3.ClusterDriverRKE {
+	var tlsDialer func(string, string) (net.Conn, error)
+	if cluster.Status.Driver == v32.ClusterDriverRKE {
 		tlsDialer, err = nameIgnoringTLSDialer(clusterDialer, caBytes)
 		if err != nil {
 			return nil, err
@@ -251,14 +295,20 @@ func ToRESTConfig(cluster *v3.Cluster, context *config.ScaledContext) (*rest.Con
 		Host:        u.String(),
 		BearerToken: cluster.Status.ServiceAccountToken,
 		TLSClientConfig: rest.TLSClientConfig{
-			CAData: append(caBytes, suffix...),
+			CAData:     append(caBytes, suffix...),
+			NextProtos: []string{"http/1.1"},
 		},
-		Timeout: 30 * time.Second,
+		Timeout:     45 * time.Second,
+		RateLimiter: ratelimit.None,
+		UserAgent:   rest.DefaultKubernetesUserAgent() + " cluster " + cluster.Name,
 		WrapTransport: func(rt http.RoundTripper) http.RoundTripper {
 			if ht, ok := rt.(*http.Transport); ok {
-				ht.DialContext = nil
-				ht.DialTLS = tlsDialer
-				ht.Dial = clusterDialer
+				if tlsDialer == nil {
+					ht.DialContext = clusterDialer
+				} else {
+					ht.DialContext = nil
+					ht.DialTLS = tlsDialer
+				}
 			}
 			return rt
 		},
@@ -267,7 +317,7 @@ func ToRESTConfig(cluster *v3.Cluster, context *config.ScaledContext) (*rest.Con
 	return rc, nil
 }
 
-func nameIgnoringTLSDialer(dialer dialer.Dialer, caBytes []byte) (dialer.Dialer, error) {
+func nameIgnoringTLSDialer(dialer dialer.Dialer, caBytes []byte) (func(string, string) (net.Conn, error), error) {
 	rkeVerify, err := VerifyIgnoreDNSName(caBytes)
 	if err != nil {
 		return nil, err
@@ -281,7 +331,9 @@ func nameIgnoringTLSDialer(dialer dialer.Dialer, caBytes []byte) (dialer.Dialer,
 	}
 
 	return func(network, address string) (net.Conn, error) {
-		rawConn, err := dialer(network, address)
+		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(15*time.Second))
+		defer cancel()
+		rawConn, err := dialer(ctx, network, address)
 		if err != nil {
 			return nil, err
 		}
@@ -348,7 +400,7 @@ func (m *Manager) toRecord(ctx context.Context, cluster *v3.Cluster) (*record, e
 	s := &record{
 		cluster:       clusterContext,
 		clusterRec:    cluster,
-		accessControl: rbac.NewAccessControl(clusterContext.RBAC),
+		accessControl: rbac.NewAccessControl(ctx, cluster.Name, clusterContext.RBACw),
 	}
 	s.ctx, s.cancel = context.WithCancel(ctx)
 
@@ -363,6 +415,7 @@ func (m *Manager) AccessControl(apiContext *types.APIContext, storageContext typ
 	if record == nil {
 		return m.accessControl, nil
 	}
+
 	return record.accessControl, nil
 }
 
@@ -479,4 +532,13 @@ func (m *Manager) KubeConfig(clusterName, token string) *clientcmdapi.Config {
 
 func (m *Manager) GetHTTPSPort() int {
 	return m.httpsPort
+}
+
+func (m *Manager) SubjectAccessReviewForCluster(req *http.Request) (authv1.SubjectAccessReviewInterface, error) {
+	clusterID := clusterrouter.GetClusterID(req)
+	userContext, err := m.UserContext(clusterID)
+	if err != nil {
+		return nil, err
+	}
+	return userContext.K8sClient.AuthorizationV1().SubjectAccessReviews(), nil
 }

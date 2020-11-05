@@ -1,12 +1,32 @@
 package tls
 
 import (
+	"context"
+	"crypto/tls"
 	"fmt"
 	"io/ioutil"
+	"net/http"
+	"net/url"
 	"os"
+	"strconv"
+	"strings"
+	"time"
 
-	v3 "github.com/rancher/types/apis/management.cattle.io/v3"
+	"github.com/pkg/errors"
+	"github.com/rancher/dynamiclistener"
+	"github.com/rancher/dynamiclistener/cert"
+	"github.com/rancher/dynamiclistener/server"
+	"github.com/rancher/dynamiclistener/storage/kubernetes"
+	"github.com/rancher/norman/types/convert"
+	"github.com/rancher/rancher/pkg/settings"
+	"github.com/rancher/wrangler/pkg/generated/controllers/core"
+	corev1controllers "github.com/rancher/wrangler/pkg/generated/controllers/core/v1"
+	"github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/net"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/rest"
 )
 
 const (
@@ -15,27 +35,164 @@ const (
 	rancherCACertsFile = "/etc/rancher/ssl/cacerts.pem"
 )
 
-func ReadTLSConfig(acmeDomains []string, noCACerts bool) (*v3.ListenConfig, error) {
+func ListenAndServe(ctx context.Context, restConfig *rest.Config, handler http.Handler, bindHost string, httpsPort, httpPort int, acmeDomains []string, noCACerts bool) error {
+	restConfig = rest.CopyConfig(restConfig)
+	restConfig.Timeout = 10 * time.Minute
+	opts := &server.ListenOpts{}
 	var err error
 
-	lc := &v3.ListenConfig{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "ListenConfig",
-			APIVersion: "management.cattle.io/v3",
+	core, err := core.NewFactoryFromConfig(restConfig)
+	if err != nil {
+		return err
+	}
+
+	if httpsPort != 0 {
+		opts, err = SetupListener(core.Core().V1().Secret(), acmeDomains, noCACerts)
+		if err != nil {
+			return errors.Wrap(err, "failed to setup TLS listener")
+		}
+	}
+
+	opts.BindHost = bindHost
+
+	migrateConfig(ctx, restConfig, opts)
+
+	if err := server.ListenAndServe(ctx, httpsPort, httpPort, handler, opts); err != nil {
+		return err
+	}
+
+	internalPort := 0
+	if httpsPort != 0 {
+		internalPort = httpsPort + 1
+	}
+
+	if err := server.ListenAndServe(ctx, internalPort, 0, handler, &server.ListenOpts{
+		Storage:       opts.Storage,
+		Secrets:       opts.Secrets,
+		CAName:        "tls-rancher-internal-ca",
+		CANamespace:   "cattle-system",
+		CertNamespace: "cattle-system",
+		CertName:      "tls-rancher-internal",
+	}); err != nil {
+		return err
+	}
+
+	if err := core.Start(ctx, 5); err != nil {
+		return err
+	}
+
+	<-ctx.Done()
+	return ctx.Err()
+
+}
+
+func migrateConfig(ctx context.Context, restConfig *rest.Config, opts *server.ListenOpts) {
+	c, err := dynamic.NewForConfig(restConfig)
+	if err != nil {
+		return
+	}
+
+	config, err := c.Resource(schema.GroupVersionResource{
+		Group:    "management.cattle.io",
+		Version:  "v3",
+		Resource: "listenconfigs",
+	}).Get(ctx, "cli-config", metav1.GetOptions{})
+	if err != nil {
+		return
+	}
+
+	known := convert.ToStringSlice(config.Object["knownIps"])
+	for k := range convert.ToMapInterface(config.Object["generatedCerts"]) {
+		if strings.HasPrefix(k, "local/") {
+			continue
+		}
+		known = append(known, k)
+	}
+
+	for _, k := range known {
+		k = strings.SplitN(k, ":", 2)[0]
+		found := false
+		for _, san := range opts.TLSListenerConfig.SANs {
+			if san == k {
+				found = true
+				break
+			}
+		}
+		if !found {
+			opts.TLSListenerConfig.SANs = append(opts.TLSListenerConfig.SANs, k)
+		}
+	}
+}
+
+func SetupListener(secrets corev1controllers.SecretController, acmeDomains []string, noCACerts bool) (*server.ListenOpts, error) {
+	caForAgent, noCACerts, opts, err := readConfig(secrets, acmeDomains, noCACerts)
+	if err != nil {
+		return nil, err
+	}
+
+	if noCACerts {
+		caForAgent = ""
+	} else if caForAgent == "" {
+		caCert, caKey, err := kubernetes.LoadOrGenCA(secrets, opts.CANamespace, opts.CAName)
+		if err != nil {
+			return nil, err
+		}
+		caForAgent = string(cert.EncodeCertPEM(caCert))
+		opts.CA = caCert
+		opts.CAKey = caKey
+	}
+
+	caForAgent = strings.TrimSpace(caForAgent)
+	if settings.CACerts.Get() != caForAgent {
+		if err := settings.CACerts.Set(caForAgent); err != nil {
+			return nil, err
+		}
+	}
+
+	return opts, nil
+}
+
+func readConfig(secrets corev1controllers.SecretController, acmeDomains []string, noCACerts bool) (string, bool, *server.ListenOpts, error) {
+	var (
+		ca  string
+		err error
+	)
+
+	tlsConfig, err := BaseTLSConfig()
+	if err != nil {
+		return "", noCACerts, nil, err
+	}
+
+	expiration, err := strconv.Atoi(settings.RotateCertsIfExpiringInDays.Get())
+	if err != nil {
+		return "", noCACerts, nil, errors.Wrapf(err, "parsing %s", settings.RotateCertsIfExpiringInDays.Get())
+	}
+
+	sans := []string{"localhost", "127.0.0.1", "rancher.cattle-system"}
+	ip, err := net.ChooseHostInterface()
+	if err == nil {
+		sans = append(sans, ip.String())
+	}
+
+	opts := &server.ListenOpts{
+		Secrets:       secrets,
+		CAName:        "tls-rancher",
+		CANamespace:   "cattle-system",
+		CertNamespace: "cattle-system",
+		AcmeDomains:   acmeDomains,
+		TLSListenerConfig: dynamiclistener.Config{
+			TLSConfig:             tlsConfig,
+			ExpirationDaysCheck:   expiration,
+			SANs:                  sans,
+			FilterCN:              filterCN,
+			CloseConnOnCertChange: true,
 		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "cli-config",
-		},
-		Enabled: true,
-		Mode:    "https",
 	}
 
 	// ACME / Let's Encrypt
 	// If --acme-domain is set, configure and return
 	if len(acmeDomains) > 0 {
-		lc.Mode = "acme"
-		lc.Domains = acmeDomains
-		return lc, nil
+		return "", true, opts, nil
 	}
 
 	// Mounted certificates
@@ -45,33 +202,31 @@ func ReadTLSConfig(acmeDomains []string, noCACerts bool) (*v3.ListenConfig, erro
 
 	// If certificate file exists but not certificate key, or other way around, error out
 	if (certFileExists && !keyFileExists) || (!certFileExists && keyFileExists) {
-		return nil, fmt.Errorf("invalid SSL configuration found, please set both certificate file and certificate key file (one is missing)")
+		return "", noCACerts, nil, fmt.Errorf("invalid SSL configuration found, please set both certificate file and certificate key file (one is missing)")
 	}
 
 	caFileExists := fileExists(rancherCACertsFile)
 
 	// If certificate file and certificate key file exists, load files into listenConfig
 	if certFileExists && keyFileExists {
-		lc.Cert, err = readPEM(rancherCertFile)
+		cert, err := tls.LoadX509KeyPair(rancherCertFile, rancherKeyFile)
 		if err != nil {
-			return nil, err
+			return "", noCACerts, nil, err
 		}
-		lc.Key, err = readPEM(rancherKeyFile)
-		if err != nil {
-			return nil, err
-		}
+		opts.TLSListenerConfig.TLSConfig.Certificates = []tls.Certificate{cert}
+
 		// Selfsigned needs cacerts, recognized CA needs --no-cacerts but can't be used together
 		if (caFileExists && noCACerts) || (!caFileExists && !noCACerts) {
-			return nil, fmt.Errorf("invalid SSL configuration found, please set cacerts when using self signed certificates or use --no-cacerts when using certificates from a recognized Certificate Authority, do not use both at the same time")
+			return "", noCACerts, nil, fmt.Errorf("invalid SSL configuration found, please set cacerts when using self signed certificates or use --no-cacerts when using certificates from a recognized Certificate Authority, do not use both at the same time")
 		}
 		// Load cacerts if exists
 		if caFileExists {
-			lc.CACerts, err = readPEM(rancherCACertsFile)
+			ca, err = readPEM(rancherCACertsFile)
 			if err != nil {
-				return nil, err
+				return "", noCACerts, nil, err
 			}
 		}
-		return lc, nil
+		return ca, noCACerts, opts, nil
 	}
 
 	// External termination
@@ -80,16 +235,35 @@ func ReadTLSConfig(acmeDomains []string, noCACerts bool) (*v3.ListenConfig, erro
 	if caFileExists {
 		// We can't have --no-cacerts
 		if noCACerts {
-			return nil, fmt.Errorf("invalid SSL configuration found, please set cacerts when using self signed certificates or use --no-cacerts when using certificates from a recognized Certificate Authority, do not use both at the same time")
+			return "", noCACerts, nil, fmt.Errorf("invalid SSL configuration found, please set cacerts when using self signed certificates or use --no-cacerts when using certificates from a recognized Certificate Authority, do not use both at the same time")
 		}
-		lc.CACerts, err = readPEM(rancherCACertsFile)
+		ca, err = readPEM(rancherCACertsFile)
 		if err != nil {
-			return nil, err
+			return "", noCACerts, nil, err
 		}
 	}
 
 	// No certificates mounted or only --no-cacerts used
-	return lc, nil
+	return ca, noCACerts, opts, nil
+}
+
+func filterCN(cns ...string) []string {
+	serverURL := settings.ServerURL.Get()
+	if serverURL == "" {
+		return cns
+	}
+	u, err := url.Parse(serverURL)
+	if err != nil {
+		logrus.Errorf("invalid server-url, can not parse %s: %v", serverURL, err)
+		return cns
+	}
+	host := u.Hostname()
+	for _, cn := range cns {
+		if cn == host {
+			return []string{host}
+		}
+	}
+	return nil
 }
 
 func fileExists(path string) bool {

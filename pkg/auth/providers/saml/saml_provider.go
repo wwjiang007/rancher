@@ -6,21 +6,23 @@ import (
 	"net/http"
 	"strings"
 
+	v32 "github.com/rancher/rancher/pkg/apis/management.cattle.io/v3"
+
 	"github.com/crewjam/saml"
 	"github.com/crewjam/saml/samlsp"
 	"github.com/mitchellh/mapstructure"
 	"github.com/pkg/errors"
 	"github.com/rancher/norman/types"
-	"github.com/rancher/rancher/pkg/api/store/auth"
+	"github.com/rancher/rancher/pkg/auth/api/secrets"
 	"github.com/rancher/rancher/pkg/auth/providers/common"
+	"github.com/rancher/rancher/pkg/auth/providers/ldap"
 	"github.com/rancher/rancher/pkg/auth/tokens"
-	corev1 "github.com/rancher/types/apis/core/v1"
-	v3 "github.com/rancher/types/apis/management.cattle.io/v3"
-	"github.com/rancher/types/apis/management.cattle.io/v3public"
-	client "github.com/rancher/types/client/management/v3"
-	publicclient "github.com/rancher/types/client/management/v3public"
-	"github.com/rancher/types/config"
-	"github.com/rancher/types/user"
+	client "github.com/rancher/rancher/pkg/client/generated/management/v3"
+	publicclient "github.com/rancher/rancher/pkg/client/generated/management/v3public"
+	corev1 "github.com/rancher/rancher/pkg/generated/norman/core/v1"
+	v3 "github.com/rancher/rancher/pkg/generated/norman/management.cattle.io/v3"
+	"github.com/rancher/rancher/pkg/types/config"
+	"github.com/rancher/rancher/pkg/user"
 	"github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -31,6 +33,7 @@ const (
 	ADFSName            = "adfs"
 	KeyCloakName        = "keycloak"
 	OKTAName            = "okta"
+	ShibbolethName      = "shibboleth"
 	loginAction         = "login"
 	testAndEnableAction = "testAndEnable"
 )
@@ -39,6 +42,7 @@ type Provider struct {
 	ctx             context.Context
 	authConfigs     v3.AuthConfigInterface
 	secrets         corev1.SecretInterface
+	samlTokens      v3.SamlTokenInterface
 	userMGR         user.Manager
 	tokenMGR        *tokens.Manager
 	serviceProvider *saml.ServiceProvider
@@ -46,6 +50,7 @@ type Provider struct {
 	userType        string
 	groupType       string
 	clientState     samlsp.ClientState
+	ldapProvider    common.AuthProvider
 }
 
 var SamlProviders = make(map[string]*Provider)
@@ -55,12 +60,18 @@ func Configure(ctx context.Context, mgmtCtx *config.ScaledContext, userMGR user.
 		ctx:         ctx,
 		authConfigs: mgmtCtx.Management.AuthConfigs(""),
 		secrets:     mgmtCtx.Core.Secrets(""),
+		samlTokens:  mgmtCtx.Management.SamlTokens(""),
 		userMGR:     userMGR,
 		tokenMGR:    tokenMGR,
 		name:        name,
 		userType:    name + "_user",
 		groupType:   name + "_group",
 	}
+
+	if samlp.hasLdapGroupSearch() {
+		samlp.ldapProvider = ldap.Configure(ctx, mgmtCtx, userMGR, tokenMGR, name)
+	}
+
 	SamlProviders[name] = samlp
 	return samlp
 }
@@ -85,6 +96,8 @@ func (s *Provider) TransformToAuthProvider(authConfig map[string]interface{}) (m
 		p[publicclient.KeyCloakProviderFieldRedirectURL] = formSamlRedirectURLFromMap(authConfig, s.name)
 	case OKTAName:
 		p[publicclient.OKTAProviderFieldRedirectURL] = formSamlRedirectURLFromMap(authConfig, s.name)
+	case ShibbolethName:
+		p[publicclient.ShibbolethProviderFieldRedirectURL] = formSamlRedirectURLFromMap(authConfig, s.name)
 	}
 	return p, nil
 }
@@ -95,7 +108,7 @@ func (s *Provider) AuthenticateUser(ctx context.Context, input interface{}) (v3.
 
 func PerformSamlLogin(name string, apiContext *types.APIContext, input interface{}) error {
 	//input will contain the FINAL redirect URL
-	login, ok := input.(*v3public.SamlLoginInput)
+	login, ok := input.(*v32.SamlLoginInput)
 	if !ok {
 		return errors.New("unexpected input type")
 	}
@@ -104,6 +117,10 @@ func PerformSamlLogin(name string, apiContext *types.APIContext, input interface
 	if provider, ok := SamlProviders[name]; ok {
 		provider.clientState.SetState(apiContext.Response, apiContext.Request, "Rancher_FinalRedirectURL", finalRedirectURL)
 		provider.clientState.SetState(apiContext.Response, apiContext.Request, "Rancher_Action", loginAction)
+		provider.clientState.SetState(apiContext.Response, apiContext.Request, "Rancher_PublicKey", login.PublicKey)
+		provider.clientState.SetState(apiContext.Response, apiContext.Request, "Rancher_RequestID", login.RequestID)
+		provider.clientState.SetState(apiContext.Response, apiContext.Request, "Rancher_ResponseType", login.ResponseType)
+
 		idpRedirectURL, err := provider.HandleSamlLogin(apiContext.Response, apiContext.Request)
 		if err != nil {
 			return err
@@ -112,15 +129,14 @@ func PerformSamlLogin(name string, apiContext *types.APIContext, input interface
 			"idpRedirectUrl": idpRedirectURL,
 			"type":           "samlLoginOutput",
 		}
-
 		apiContext.WriteResponse(http.StatusOK, data)
+
 		return nil
 	}
-
 	return nil
 }
 
-func (s *Provider) getSamlConfig() (*v3.SamlConfig, error) {
+func (s *Provider) getSamlConfig() (*v32.SamlConfig, error) {
 	authConfigObj, err := s.authConfigs.ObjectClient().UnstructuredClient().Get(s.name, metav1.GetOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("SAML: failed to retrieve SamlConfig, error: %v", err)
@@ -132,7 +148,7 @@ func (s *Provider) getSamlConfig() (*v3.SamlConfig, error) {
 	}
 	storedSamlConfigMap := u.UnstructuredContent()
 
-	storedSamlConfig := &v3.SamlConfig{}
+	storedSamlConfig := &v32.SamlConfig{}
 	mapstructure.Decode(storedSamlConfigMap, storedSamlConfig)
 
 	if enabled, ok := storedSamlConfigMap["enabled"].(bool); ok {
@@ -160,7 +176,7 @@ func (s *Provider) getSamlConfig() (*v3.SamlConfig, error) {
 	return storedSamlConfig, nil
 }
 
-func (s *Provider) saveSamlConfig(config *v3.SamlConfig) error {
+func (s *Provider) saveSamlConfig(config *v32.SamlConfig) error {
 	var configType string
 
 	storedSamlConfig, err := s.getSamlConfig()
@@ -177,6 +193,8 @@ func (s *Provider) saveSamlConfig(config *v3.SamlConfig) error {
 		configType = client.KeyCloakConfigType
 	case OKTAName:
 		configType = client.OKTAConfigType
+	case ShibbolethName:
+		configType = client.ShibbolethConfigType
 	}
 
 	config.APIVersion = "management.cattle.io/v3"
@@ -185,21 +203,20 @@ func (s *Provider) saveSamlConfig(config *v3.SamlConfig) error {
 	storedSamlConfig.Annotations = config.Annotations
 	config.ObjectMeta = storedSamlConfig.ObjectMeta
 
-	field := strings.ToLower(auth.TypeToFields[configType][0])
+	field := strings.ToLower(secrets.TypeToFields[configType][0])
 	if err := common.CreateOrUpdateSecrets(s.secrets, config.SpKey,
 		field, strings.ToLower(config.Type)); err != nil {
 		return err
 	}
 
 	config.SpKey = common.GetName(config.Type, field)
-
-	logrus.Debugf("updating samlConfig %s", s.name)
-	_, err = s.authConfigs.ObjectClient().Update(config.ObjectMeta.Name, config)
-	if err != nil {
+	if s.hasLdapGroupSearch() {
+		_, err = s.authConfigs.ObjectClient().Update(config.ObjectMeta.Name, s.combineSamlAndLdapConfig(config))
 		return err
 	}
-	return nil
 
+	_, err = s.authConfigs.ObjectClient().Update(config.ObjectMeta.Name, config)
+	return err
 }
 
 func (s *Provider) toPrincipal(principalType string, princ v3.Principal, token *v3.Token) v3.Principal {
@@ -223,13 +240,19 @@ func (s *Provider) toPrincipal(principalType string, princ v3.Principal, token *
 }
 
 func (s *Provider) RefetchGroupPrincipals(principalID string, secret string) ([]v3.Principal, error) {
-	// This should never be called
 	return nil, errors.New("Not implemented")
 }
 
 func (s *Provider) SearchPrincipals(searchKey, principalType string, token v3.Token) ([]v3.Principal, error) {
-	var principals []v3.Principal
+	if s.hasLdapGroupSearch() {
+		principals, err := s.ldapProvider.SearchPrincipals(searchKey, principalType, token)
+		// only give response from ldap if it's configured
+		if !ldap.IsNotConfigured(err) {
+			return principals, err
+		}
+	}
 
+	var principals []v3.Principal
 	if principalType == "" {
 		principalType = "user"
 	}
@@ -243,20 +266,24 @@ func (s *Provider) SearchPrincipals(searchKey, principalType string, token v3.To
 	}
 
 	principals = append(principals, p)
-
 	return principals, nil
 }
 
 func (s *Provider) GetPrincipal(principalID string, token v3.Token) (v3.Principal, error) {
-	parts := strings.SplitN(principalID, ":", 2)
-	if len(parts) != 2 {
+	externalID, principalType := splitPrincipalID(principalID)
+	if externalID == "" && principalType == "" {
 		return v3.Principal{}, fmt.Errorf("SAML: invalid id %v", principalID)
 	}
-	principalType := parts[0]
-	externalID := strings.TrimPrefix(parts[1], "//")
-
 	if principalType != s.userType && principalType != s.groupType {
 		return v3.Principal{}, fmt.Errorf("SAML: Invalid principal type")
+	}
+
+	if s.hasLdapGroupSearch() {
+		p, err := s.ldapProvider.GetPrincipal(principalID, token)
+		// only give response from ldap if it's configured
+		if !ldap.IsNotConfigured(err) {
+			return p, err
+		}
 	}
 
 	p := v3.Principal{
@@ -267,7 +294,6 @@ func (s *Provider) GetPrincipal(principalID string, token v3.Token) (v3.Principa
 	}
 
 	p = s.toPrincipal(principalType, p, &token)
-
 	return p, nil
 }
 
@@ -276,23 +302,6 @@ func (s *Provider) isThisUserMe(me v3.Principal, other v3.Principal) bool {
 		return true
 	}
 	return false
-}
-
-func formSamlRedirectURLFromMap(config map[string]interface{}, name string) string {
-	var hostname string
-	switch name {
-	case PingName:
-		hostname, _ = config[client.PingConfigFieldRancherAPIHost].(string)
-	case ADFSName:
-		hostname, _ = config[client.ADFSConfigFieldRancherAPIHost].(string)
-	case KeyCloakName:
-		hostname, _ = config[client.KeyCloakConfigFieldRancherAPIHost].(string)
-	case OKTAName:
-		hostname, _ = config[client.OKTAConfigFieldRancherAPIHost].(string)
-	}
-
-	path := hostname + "/v1-saml/" + name + "/login"
-	return path
 }
 
 func (s *Provider) CanAccessWithGroupProviders(userPrincipalID string, groupPrincipals []v3.Principal) (bool, error) {
@@ -306,4 +315,74 @@ func (s *Provider) CanAccessWithGroupProviders(userPrincipalID string, groupPrin
 		return false, err
 	}
 	return allowed, nil
+}
+
+func formSamlRedirectURLFromMap(config map[string]interface{}, name string) string {
+	var hostname string
+	switch name {
+	case PingName:
+		hostname, _ = config[client.PingConfigFieldRancherAPIHost].(string)
+	case ADFSName:
+		hostname, _ = config[client.ADFSConfigFieldRancherAPIHost].(string)
+	case KeyCloakName:
+		hostname, _ = config[client.KeyCloakConfigFieldRancherAPIHost].(string)
+	case OKTAName:
+		hostname, _ = config[client.OKTAConfigFieldRancherAPIHost].(string)
+	case ShibbolethName:
+		hostname, _ = config[client.ShibbolethConfigFieldRancherAPIHost].(string)
+	}
+
+	path := hostname + "/v1-saml/" + name + "/login"
+	return path
+}
+
+func splitPrincipalID(principalID string) (string, string) {
+	parts := strings.SplitN(principalID, ":", 2)
+	if len(parts) != 2 {
+		return "", ""
+	}
+	externalID := strings.TrimPrefix(parts[1], "//")
+	return externalID, parts[0]
+}
+
+func (s *Provider) combineSamlAndLdapConfig(config *v32.SamlConfig) runtime.Object {
+	// if errors we might not want to turn on ldap
+	ldapConfig, _, err := ldap.GetLDAPConfig(s.ldapProvider)
+
+	// can be misconfigured but still want it saved
+	if err != nil {
+		logrus.Warnf("error pulling %s ldap configs: %s\n", s.name, err)
+
+		// if the the config subkey not in the crd
+		if ldapConfig == nil {
+			return config
+		}
+
+		// only return the saml config on other errors
+		// if not configured it might have data in it we want to keep
+		if !ldap.IsNotConfigured(err) {
+			return config
+		}
+	}
+
+	var fullConfig runtime.Object
+	samlConfig := v32.SamlConfig{}
+	config.DeepCopyInto(&samlConfig)
+
+	switch s.name {
+	case ShibbolethName:
+		fullConfig = &v32.ShibbolethConfig{
+			SamlConfig:     samlConfig,
+			OpenLdapConfig: ldapConfig.LdapFields,
+		}
+	}
+
+	return fullConfig
+}
+
+func (s *Provider) hasLdapGroupSearch() bool {
+	if s.name == ShibbolethName {
+		return true
+	}
+	return false
 }

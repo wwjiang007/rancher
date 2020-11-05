@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"strings"
 
-	v3 "github.com/rancher/types/apis/management.cattle.io/v3"
+	v3 "github.com/rancher/rancher/pkg/generated/norman/management.cattle.io/v3"
 )
 
 type ClusterLookup interface {
@@ -12,13 +12,11 @@ type ClusterLookup interface {
 }
 
 func GetClusterID(req *http.Request) string {
-	clusterID := req.Header.Get("X-API-Cluster-Id")
-	if clusterID != "" {
-		return clusterID
-	}
-
 	parts := strings.Split(req.URL.Path, "/")
-	if len(parts) > 3 && strings.HasPrefix(parts[2], "cluster") {
+	if len(parts) > 3 &&
+		parts[0] == "" &&
+		(parts[1] == "k8s" || parts[1] == "v3") &&
+		(parts[2] == "clusters" || parts[2] == "cluster") {
 		return parts[3]
 	}
 

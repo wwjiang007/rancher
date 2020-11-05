@@ -11,20 +11,26 @@ gkecredential = pytest.mark.skipif(not CREDENTIALS, reason='GKE Credentials '
 
 @gkecredential
 def test_create_gke_cluster():
-
-    client = get_admin_client()
-    gkeConfig = get_gke_config()
-
-    print("Cluster creation")
-    cluster = client.create_cluster(gkeConfig)
-    print(cluster)
-    cluster = validate_cluster(client, cluster, check_intermediate_state=True,
-                               skipIngresscheck=True)
-
+    # Obtain GKE config data
+    gke_version, credential_data = get_gke_version_credentials()
+    client, cluster = create_and_validate_gke_cluster("test-auto-gke",
+                                                      gke_version,
+                                                      credential_data)
     cluster_cleanup(client, cluster)
 
 
-def get_gke_version_credentials():
+def create_and_validate_gke_cluster(name, version, credential_data):
+    gke_config = get_gke_config(name, version, credential_data)
+    client = get_user_client()
+    print("Cluster creation")
+    cluster = client.create_cluster(gke_config)
+    print(cluster)
+    cluster = validate_cluster(client, cluster, check_intermediate_state=True,
+                               skipIngresscheck=True)
+    return client, cluster
+
+
+def get_gke_version_credentials(multiple_versions=False):
     credfilename = "credential.txt"
     PATH = os.path.dirname(os.path.realpath(__file__))
     credfilepath = PATH + "/" + credfilename
@@ -47,7 +53,7 @@ def get_gke_version_credentials():
         }
         headers = {"Content-Type": "application/json",
                    "Accept": "application/json",
-                   "Authorization": "Bearer " + ADMIN_TOKEN}
+                   "Authorization": "Bearer " + USER_TOKEN}
 
         gke_version_url = CATTLE_TEST_URL + "/meta/gkeVersions"
         print(gke_version_url)
@@ -59,29 +65,21 @@ def get_gke_version_credentials():
         print(response.content)
         json_response = json.loads(response.content)
         validMasterVersions = json_response["validMasterVersions"]
-        gkemasterversion = validMasterVersions[0]
+        if multiple_versions and len(validMasterVersions) > 1:
+            gkemasterversion = [validMasterVersions[0],
+                                validMasterVersions[-1]]
+        else:
+            gkemasterversion = validMasterVersions[0]
     else:
         gkemasterversion = GKE_MASTER_VERSION
     print(gkemasterversion)
     return gkemasterversion, credentialdata
 
 
-def readDataFile(data_dir, name):
-    fname = os.path.join(data_dir, name)
-    print(fname)
-    is_file = os.path.isfile(fname)
-    assert is_file
-    with open(fname) as f:
-        return f.read()
+def get_gke_config(name, version, credential_data):
 
-
-def get_gke_config():
-
-    # Obtain GKE master version and credentials
-    gkemasterversion, credentialdata = get_gke_version_credentials()
     # Get GKE configuration
-    gkeConfig = {
-        "type": "cluster",
+    gke_config = {
         "googleKubernetesEngineConfig": {
             "diskSizeGb": 100,
             "enableAlphaFeature": False,
@@ -92,18 +90,18 @@ def get_gke_config():
             "enableNetworkPolicyConfig": True,
             "enableStackdriverLogging": True,
             "enableStackdriverMonitoring": True,
-            "masterVersion": gkemasterversion,
+            "masterVersion": version,
             "machineType": "g1-small",
             "type": "googleKubernetesEngineConfig",
             "nodeCount": 3,
             "zone": "us-central1-f",
             "clusterIpv4Cidr": " ",
-            "credential": credentialdata,
+            "credential": credential_data,
             "projectId": "rancher-qa",
 
         },
-        "name": "test-auto-gke",
+        "name": name,
         "type": "cluster"
     }
 
-    return gkeConfig
+    return gke_config

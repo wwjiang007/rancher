@@ -2,7 +2,7 @@ package manager
 
 import (
 	helmlib "github.com/rancher/rancher/pkg/catalog/helm"
-	v3 "github.com/rancher/types/apis/management.cattle.io/v3"
+	v3 "github.com/rancher/rancher/pkg/generated/norman/management.cattle.io/v3"
 	"github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -35,6 +35,7 @@ func (m *Manager) ProjectCatalogSync(key string, obj *v3.ProjectCatalog) (runtim
 	if err != nil {
 		return m.updateProjectCatalogError(projectCatalog, err)
 	}
+	logrus.Debugf("Chart hash comparison for project catalog %v: new -- %v --- current -- %v", projectCatalog.Name, commit, &projectCatalog.Catalog.Status.Commit)
 
 	if isUpToDate(commit, &projectCatalog.Catalog) {
 		if setRefreshed(&projectCatalog.Catalog) {

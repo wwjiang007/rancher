@@ -1,10 +1,14 @@
 package manager
 
 import (
+	"errors"
 	"fmt"
+	"strings"
 
-	v3 "github.com/rancher/types/apis/management.cattle.io/v3"
-	client "github.com/rancher/types/client/management/v3"
+	v32 "github.com/rancher/rancher/pkg/apis/management.cattle.io/v3"
+
+	client "github.com/rancher/rancher/pkg/client/generated/management/v3"
+	v3 "github.com/rancher/rancher/pkg/generated/norman/management.cattle.io/v3"
 	"github.com/sirupsen/logrus"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -12,8 +16,8 @@ import (
 )
 
 func hasAllUpdates(catalog *v3.Catalog) bool {
-	upgraded := v3.CatalogConditionUpgraded.IsTrue(catalog)
-	diskCached := v3.CatalogConditionDiskCached.IsTrue(catalog)
+	upgraded := v32.CatalogConditionUpgraded.IsTrue(catalog)
+	diskCached := v32.CatalogConditionDiskCached.IsTrue(catalog)
 	return upgraded && diskCached
 }
 
@@ -25,18 +29,18 @@ func isUpToDate(commit string, catalog *v3.Catalog) bool {
 
 func setRefreshed(catalog *v3.Catalog) bool {
 	logrus.Debugf("Catalog %s is already up to date", catalog.Name)
-	if !v3.CatalogConditionRefreshed.IsTrue(catalog) {
-		v3.CatalogConditionRefreshed.True(catalog)
-		v3.CatalogConditionRefreshed.Reason(catalog, "")
-		v3.CatalogConditionRefreshed.Message(catalog, "")
+	if !v32.CatalogConditionRefreshed.IsTrue(catalog) {
+		v32.CatalogConditionRefreshed.True(catalog)
+		v32.CatalogConditionRefreshed.Reason(catalog, "")
+		v32.CatalogConditionRefreshed.Message(catalog, "")
 		return true
 	}
 	return false
 }
 
 func setRefreshedError(catalog *v3.Catalog, err error) {
-	v3.CatalogConditionRefreshed.False(catalog)
-	v3.CatalogConditionRefreshed.ReasonAndMessageFromError(catalog, err)
+	v32.CatalogConditionRefreshed.False(catalog)
+	v32.CatalogConditionRefreshed.ReasonAndMessageFromError(catalog, err)
 }
 
 func (m *Manager) deleteTemplates(key string, namespace string) error {
@@ -48,6 +52,10 @@ func (m *Manager) deleteTemplates(key string, namespace string) error {
 	for _, t := range templates {
 		tvs, err := m.getTemplateVersion(t.Name, namespace)
 		if err != nil {
+			//if template version doesn't exist continue to delete template
+			if strings.Contains(err.Error(), "invalid label value") {
+				continue
+			}
 			return err
 		}
 		for k := range tvs {
@@ -97,11 +105,11 @@ func (m *Manager) updateCatalogInfo(cmt *CatalogInfo, catalogType string, templa
 		default:
 			return cmt, fmt.Errorf("incorrect catalog type")
 		}
-		v3.CatalogConditionRefreshed.Unknown(obj)
+		v32.CatalogConditionRefreshed.Unknown(obj)
 		if templateName != "" {
-			v3.CatalogConditionRefreshed.Message(obj, fmt.Sprintf("syncing template %v", templateName))
+			v32.CatalogConditionRefreshed.Message(obj, fmt.Sprintf("syncing catalog %v", cmt.catalog.Name))
 		} else {
-			v3.CatalogConditionRefreshed.Message(obj, fmt.Sprintf(""))
+			v32.CatalogConditionRefreshed.Message(obj, fmt.Sprintf(""))
 		}
 	}
 
@@ -157,4 +165,59 @@ func (m *Manager) updateCatalogInfo(cmt *CatalogInfo, catalogType string, templa
 	}
 
 	return cmt, nil
+}
+
+func setCatalogErrorState(cmt *CatalogInfo, catalog *v3.Catalog, projectCatalog *v3.ProjectCatalog, clusterCatalog *v3.ClusterCatalog) {
+	v32.CatalogConditionRefreshed.False(catalog)
+	v32.CatalogConditionRefreshed.Message(catalog, fmt.Sprintf("Error syncing catalog %v", catalog.Name))
+	v32.CatalogConditionProcessed.True(catalog)
+	cmt.catalog = catalog
+	cmt.projectCatalog = projectCatalog
+	cmt.clusterCatalog = clusterCatalog
+}
+
+func setCatalogIgnoreErrorState(commit string, cmt *CatalogInfo, catalog *v3.Catalog, projectCatalog *v3.ProjectCatalog, clusterCatalog *v3.ClusterCatalog, message string) {
+	v32.CatalogConditionProcessed.False(catalog)
+	v32.CatalogConditionProcessed.Message(catalog, message)
+	v32.CatalogConditionRefreshed.Message(catalog, "")
+	v32.CatalogConditionProcessed.ReasonAndMessageFromError(catalog, errors.New(message))
+	v32.CatalogConditionRefreshed.True(catalog)
+	catalog.Status.Commit = commit
+	if projectCatalog != nil {
+		projectCatalog.Catalog = *catalog
+	} else if clusterCatalog != nil {
+		clusterCatalog.Catalog = *catalog
+	}
+	cmt.catalog = catalog
+	cmt.projectCatalog = projectCatalog
+	cmt.clusterCatalog = clusterCatalog
+}
+
+func setTraverseCompleted(catalog *v3.Catalog) {
+	v32.CatalogConditionUpgraded.True(catalog)
+	v32.CatalogConditionDiskCached.True(catalog)
+	v32.CatalogConditionProcessed.True(catalog)
+	v32.CatalogConditionProcessed.Message(catalog, "")
+	v32.CatalogConditionProcessed.Reason(catalog, "")
+}
+
+// Using Helm standards to make a qualified name to be used for template name, see link below
+// General Helm Chart conventions should be followed as we will not correct all potential issues
+// https://github.com/helm/helm/blob/9b42702a4bced339ff424a78ad68dd6be6e1a80a/cmd/helm/testdata/testcharts/chart-with-template-lib-dep/charts/common/templates/_fullname.tpl
+func getValidTemplateName(catalogName, chartName string) string {
+	templateName := fmt.Sprintf("%s-%s", catalogName, chartName)
+	templateName = strings.ToLower(templateName)
+	templateName = strings.TrimSuffix(templateName, "-")
+	return templateName
+}
+
+// Using Helm standards to make a label to be used for the template version name, see link below
+// General Helm Chart conventions should be followed as we will not correct all potential issues
+// https://github.com/helm/helm/blob/3582b03a91bb994aa4d33a7bc50de5205f734c7a/pkg/chartutil/create.go
+func getValidTemplateNameWithVersion(templateName, version string) string {
+	label := fmt.Sprintf("%s-%s", templateName, version)
+	label = strings.ReplaceAll(label, "+", "-")
+	label = strings.TrimSuffix(label, "-")
+	label = strings.ToLower(label)
+	return label
 }

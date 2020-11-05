@@ -10,7 +10,8 @@ import (
 
 	"github.com/pkg/errors"
 	"github.com/rancher/norman/httperror"
-	v3 "github.com/rancher/types/apis/management.cattle.io/v3"
+	v32 "github.com/rancher/rancher/pkg/apis/management.cattle.io/v3"
+	v3 "github.com/rancher/rancher/pkg/generated/norman/management.cattle.io/v3"
 	"github.com/sirupsen/logrus"
 	ldapv2 "gopkg.in/ldap.v2"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -26,6 +27,10 @@ type ConfigAttributes struct {
 	UserLoginAttribute          string
 	UserNameAttribute           string
 	UserObjectClass             string
+}
+
+func Connect(config *v3.LdapConfig, caPool *x509.CertPool) (*ldapv2.Conn, error) {
+	return NewLDAPConn(config.Servers, config.TLS, config.Port, config.ConnectionTimeout, caPool)
 }
 
 func NewLDAPConn(servers []string, TLS bool, port int64, connectionTimeout int64, caPool *x509.CertPool) (*ldapv2.Conn, error) {
@@ -94,19 +99,29 @@ func HasPermission(attributes []*ldapv2.EntryAttribute, userObjectClass string, 
 
 func IsType(search []*ldapv2.EntryAttribute, varType string) bool {
 	for _, attrib := range search {
-		if attrib.Name == "objectClass" {
+		if strings.EqualFold(attrib.Name, "objectClass") {
 			for _, val := range attrib.Values {
 				if strings.EqualFold(val, varType) {
+					logrus.Debugf("ldap IsType found object of type %s", varType)
 					return true
 				}
 			}
 		}
 	}
-	logrus.Debugf("Failed to determine if object is type: %s", varType)
+	logrus.Debugf("ldap IsType failed to determine if object is type: %s", varType)
 	return false
 }
 
-func GetUserSearchAttributes(memberOfAttribute, ObjectClass string, config *v3.ActiveDirectoryConfig) []string {
+func GetAttributeValuesByName(search []*ldapv2.EntryAttribute, attributeName string) []string {
+	for _, attrib := range search {
+		if attrib.Name == attributeName {
+			return attrib.Values
+		}
+	}
+	return []string{}
+}
+
+func GetUserSearchAttributes(memberOfAttribute, ObjectClass string, config *v32.ActiveDirectoryConfig) []string {
 	userSearchAttributes := []string{memberOfAttribute,
 		ObjectClass,
 		config.UserObjectClass,
@@ -116,7 +131,7 @@ func GetUserSearchAttributes(memberOfAttribute, ObjectClass string, config *v3.A
 	return userSearchAttributes
 }
 
-func GetGroupSearchAttributes(memberOfAttribute, ObjectClass string, config *v3.ActiveDirectoryConfig) []string {
+func GetGroupSearchAttributes(memberOfAttribute, ObjectClass string, config *v32.ActiveDirectoryConfig) []string {
 	groupSeachAttributes := []string{memberOfAttribute,
 		ObjectClass,
 		config.GroupObjectClass,
@@ -138,7 +153,6 @@ func GetUserSearchAttributesForLDAP(ObjectClass string, config *v3.LdapConfig) [
 
 func GetGroupSearchAttributesForLDAP(ObjectClass string, config *v3.LdapConfig) []string {
 	groupSeachAttributes := []string{config.GroupMemberUserAttribute,
-		config.GroupMemberMappingAttribute,
 		ObjectClass,
 		config.GroupObjectClass,
 		config.UserLoginAttribute,
@@ -289,4 +303,28 @@ func Min(a int, b int) int {
 		return a
 	}
 	return b
+}
+
+func NewCAPool(cert string) (*x509.CertPool, error) {
+	pool, err := x509.SystemCertPool()
+	if err != nil {
+		return nil, err
+	}
+	pool.AppendCertsFromPEM([]byte(cert))
+	return pool, nil
+}
+
+func ValidateLdapConfig(ldapConfig *v3.LdapConfig, certpool *x509.CertPool) (bool, error) {
+	if len(ldapConfig.Servers) != 1 {
+		return false, nil
+	}
+
+	lConn, err := Connect(ldapConfig, certpool)
+	if err != nil {
+		return false, err
+	}
+	defer lConn.Close()
+
+	logrus.Debugf("validated ldap configuration: %s", ldapConfig.Servers[0])
+	return true, nil
 }

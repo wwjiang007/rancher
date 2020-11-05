@@ -6,14 +6,20 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
 	"strings"
 	"sync"
 
+	v32 "github.com/rancher/rancher/pkg/apis/management.cattle.io/v3"
+
 	"github.com/rancher/norman/httperror"
-	v3 "github.com/rancher/types/apis/management.cattle.io/v3"
-	"github.com/rancher/types/config/dialer"
+	factory "github.com/rancher/rancher/pkg/dialer"
+	v3 "github.com/rancher/rancher/pkg/generated/norman/management.cattle.io/v3"
+	"github.com/rancher/rancher/pkg/types/config/dialer"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/httpstream"
+	utilnet "k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/apimachinery/pkg/util/proxy"
 	"k8s.io/client-go/rest"
 )
@@ -96,7 +102,7 @@ func NewLocal(localConfig *rest.Config, cluster *v3.Cluster) (*RemoteService, er
 }
 
 func NewRemote(cluster *v3.Cluster, clusterLister v3.ClusterLister, factory dialer.Factory) (*RemoteService, error) {
-	if !v3.ClusterConditionProvisioned.IsTrue(cluster) {
+	if !v32.ClusterConditionProvisioned.IsTrue(cluster) {
 		return nil, httperror.NewAPIError(httperror.ClusterUnavailable, "cluster not provisioned")
 	}
 
@@ -166,7 +172,10 @@ func (r *RemoteService) getTransport() (http.RoundTripper, error) {
 		if err != nil {
 			return nil, err
 		}
-		transport.Dial = d
+		transport.DialContext = d
+		if factory.IsCloudDriver(newCluster) {
+			transport.Proxy = http.ProxyFromEnvironment
+		}
 	}
 
 	r.caCert = newCluster.Status.CACert
@@ -227,6 +236,13 @@ func (r *RemoteService) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		er.Error(rw, req, err)
 		return
 	}
+
+	if httpstream.IsUpgradeRequest(req) {
+		upgradeProxy := NewUpgradeProxy(&u, transport)
+		upgradeProxy.ServeHTTP(rw, req)
+		return
+	}
+
 	httpProxy := proxy.NewUpgradeAwareHandler(&u, transport, true, false, er)
 	httpProxy.ServeHTTP(rw, req)
 }
@@ -235,44 +251,27 @@ func (r *RemoteService) Cluster() *v3.Cluster {
 	return r.cluster
 }
 
-type SimpleProxy struct {
-	url                *url.URL
-	transport          http.RoundTripper
-	overrideHostHeader bool
+type UpgradeProxy struct {
+	Location  *url.URL
+	Transport http.RoundTripper
 }
 
-func NewSimpleProxy(host string, caData []byte, overrideHostHeader bool) (*SimpleProxy, error) {
-	hostURL, _, err := rest.DefaultServerURL(host, "", schema.GroupVersion{}, true)
-	if err != nil {
-		return nil, err
+func NewUpgradeProxy(location *url.URL, transport http.RoundTripper) *UpgradeProxy {
+	return &UpgradeProxy{
+		Location:  location,
+		Transport: transport,
 	}
-
-	ht := &http.Transport{}
-	if len(caData) > 0 {
-		certPool := x509.NewCertPool()
-		certPool.AppendCertsFromPEM(caData)
-		ht.TLSClientConfig = &tls.Config{
-			RootCAs: certPool,
-		}
-	}
-
-	return &SimpleProxy{
-		url:                hostURL,
-		transport:          ht,
-		overrideHostHeader: overrideHostHeader,
-	}, nil
 }
 
-func (s *SimpleProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
-	u := *s.url
-	u.Path = req.URL.Path
-	u.RawQuery = req.URL.RawQuery
-	req.URL.Scheme = "https"
-	req.URL.Host = req.Host
-	if s.overrideHostHeader {
-		req.Host = u.Host
-	}
-	httpProxy := proxy.NewUpgradeAwareHandler(&u, s.transport, true, false, er)
-	httpProxy.ServeHTTP(rw, req)
+func (p *UpgradeProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+	loc := *p.Location
+	loc.RawQuery = req.URL.RawQuery
 
+	newReq := req.WithContext(req.Context())
+	newReq.Header = utilnet.CloneHeader(req.Header)
+	newReq.URL = &loc
+
+	httpProxy := httputil.NewSingleHostReverseProxy(&url.URL{Scheme: p.Location.Scheme, Host: p.Location.Host})
+	httpProxy.Transport = p.Transport
+	httpProxy.ServeHTTP(rw, newReq)
 }

@@ -1,8 +1,12 @@
 package saml
 
 import (
+	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
 	"encoding/pem"
 	"encoding/xml"
 	"fmt"
@@ -15,10 +19,14 @@ import (
 	"github.com/crewjam/saml"
 	"github.com/crewjam/saml/samlsp"
 	"github.com/gorilla/mux"
+	responsewriter "github.com/rancher/apiserver/pkg/middleware"
+	v32 "github.com/rancher/rancher/pkg/apis/management.cattle.io/v3"
 	"github.com/rancher/rancher/pkg/auth/tokens"
-	v3 "github.com/rancher/types/apis/management.cattle.io/v3"
+	v3 "github.com/rancher/rancher/pkg/generated/norman/management.cattle.io/v3"
+	"github.com/rancher/rancher/pkg/namespace"
 	log "github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 type IDPMetadata struct {
@@ -35,7 +43,7 @@ var initMu sync.Mutex
 
 const UITranslationKeyForErrorMessage = "invalidSamlAttrs"
 
-func InitializeSamlServiceProvider(configToSet *v3.SamlConfig, name string) error {
+func InitializeSamlServiceProvider(configToSet *v32.SamlConfig, name string) error {
 
 	initMu.Lock()
 	defer initMu.Unlock()
@@ -125,6 +133,7 @@ func InitializeSamlServiceProvider(configToSet *v3.SamlConfig, name string) erro
 		Certificate: cert,
 		MetadataURL: metadataURL,
 		AcsURL:      acsURL,
+		EntityID:    configToSet.EntityID,
 	}
 
 	// XML unmarshal throws an error for IdP Metadata cacheDuration field, as it's of type xml Duration. Using a separate struct for unmarshaling for now
@@ -154,6 +163,8 @@ func InitializeSamlServiceProvider(configToSet *v3.SamlConfig, name string) erro
 	}
 	provider.clientState = &cookieStore
 
+	root.Use(responsewriter.ContentTypeOptions)
+
 	SamlProviders[name] = provider
 
 	switch name {
@@ -169,6 +180,9 @@ func InitializeSamlServiceProvider(configToSet *v3.SamlConfig, name string) erro
 	case OKTAName:
 		root.Get("OktaACS").HandlerFunc(provider.ServeHTTP)
 		root.Get("OktaMetadata").HandlerFunc(provider.ServeHTTP)
+	case ShibbolethName:
+		root.Get("ShibbolethACS").HandlerFunc(provider.ServeHTTP)
+		root.Get("ShibbolethMetadata").HandlerFunc(provider.ServeHTTP)
 	}
 
 	appliedVersion = configToSet.ResourceVersion
@@ -178,6 +192,7 @@ func InitializeSamlServiceProvider(configToSet *v3.SamlConfig, name string) erro
 
 func AuthHandler() http.Handler {
 	root = mux.NewRouter()
+
 	root.Methods("POST").Path("/v1-saml/ping/saml/acs").Name("PingACS")
 	root.Methods("GET").Path("/v1-saml/ping/saml/metadata").Name("PingMetadata")
 
@@ -190,10 +205,13 @@ func AuthHandler() http.Handler {
 	root.Methods("POST").Path("/v1-saml/okta/saml/acs").Name("OktaACS")
 	root.Methods("GET").Path("/v1-saml/okta/saml/metadata").Name("OktaMetadata")
 
+	root.Methods("POST").Path("/v1-saml/shibboleth/saml/acs").Name("ShibbolethACS")
+	root.Methods("GET").Path("/v1-saml/shibboleth/saml/metadata").Name("ShibbolethMetadata")
+
 	return root
 }
 
-func (s *Provider) getSamlPrincipals(config *v3.SamlConfig, samlData map[string][]string) (v3.Principal, []v3.Principal, error) {
+func (s *Provider) getSamlPrincipals(config *v32.SamlConfig, samlData map[string][]string) (v3.Principal, []v3.Principal, error) {
 	var userPrincipal v3.Principal
 	var groupPrincipals []v3.Principal
 	uid, ok := samlData[config.UIDField]
@@ -358,12 +376,71 @@ func (s *Provider) HandleSamlAssertion(w http.ResponseWriter, r *http.Request, a
 		http.Redirect(w, r, redirectURL+"errorCode=500", http.StatusFound)
 	}
 	redirectURL = s.clientState.GetState(r, "Rancher_FinalRedirectURL")
+
 	if redirectURL != "" {
 		// delete the cookie
 		s.clientState.DeleteState(w, r, "Rancher_FinalRedirectURL")
+
+		requestID := s.clientState.GetState(r, "Rancher_RequestID")
+		log.Debugf("SAML: requestID: %s", requestID)
+		if requestID != "" {
+			// generate kubeconfig saml token
+			responseType := s.clientState.GetState(r, "Rancher_ResponseType")
+			publicKey := s.clientState.GetState(r, "Rancher_PublicKey")
+
+			token, err := tokens.GetKubeConfigToken(user.Name, responseType, s.userMGR)
+			if err != nil {
+				log.Errorf("SAML: getToken error %v", err)
+				http.Redirect(w, r, redirectURL+"errorCode=500", http.StatusFound)
+				return
+			}
+
+			keyBytes, err := base64.StdEncoding.DecodeString(publicKey)
+			pubKey := &rsa.PublicKey{}
+			err = json.Unmarshal(keyBytes, pubKey)
+			if err != nil {
+				log.Errorf("SAML: getPublicKey error %v", err)
+				http.Redirect(w, r, redirectURL+"errorCode=500", http.StatusFound)
+				return
+			}
+			encryptedToken, err := rsa.EncryptOAEP(
+				sha256.New(),
+				rand.Reader,
+				pubKey,
+				[]byte(fmt.Sprintf("%s:%s", token.ObjectMeta.Name, token.Token)),
+				nil)
+			if err != nil {
+				log.Errorf("SAML: getEncryptedToken error %v", err)
+				http.Redirect(w, r, redirectURL+"errorCode=500", http.StatusFound)
+				return
+			}
+			encoded := base64.StdEncoding.EncodeToString(encryptedToken)
+
+			samlToken := &v3.SamlToken{
+				Token:     encoded,
+				ExpiresAt: token.ExpiresAt,
+				ObjectMeta: v1.ObjectMeta{
+					Name:      requestID,
+					Namespace: namespace.GlobalNamespace,
+				},
+			}
+
+			_, err = s.samlTokens.Create(samlToken)
+			if err != nil {
+				log.Errorf("SAML: createToken err %v", err)
+				http.Redirect(w, r, redirectURL+"errorCode=500", http.StatusFound)
+			}
+
+			s.clientState.DeleteState(w, r, "Rancher_ConnToken")
+			s.clientState.DeleteState(w, r, "Rancher_RequestUUID")
+			s.clientState.DeleteState(w, r, "Rancher_ResponseType")
+			s.clientState.DeleteState(w, r, "Rancher_PublicKey")
+
+		}
+
 		http.Redirect(w, r, redirectURL, http.StatusFound)
+		return
 	}
-	return
 }
 
 func setRancherToken(w http.ResponseWriter, r *http.Request, tokenMGR *tokens.Manager, userID string, userPrincipal v3.Principal,

@@ -8,12 +8,12 @@ namespace = {"p_client": None,
              "pv": None,
              "pvc": None}
 
-# this is the IP address of the NFS server
-NFS_SERVER = os.environ.get("RANCHER_NFS_SERVER", "")
 # this is the path to the mounted dir in the NFS server
-NFS_SERVER_MOUNT_PATH = os.environ.get('RANCHER_NFS_SERVER_MOUNT_PATH', "/nfs")
+NFS_SERVER_MOUNT_PATH = "/nfs"
 # this is the path to the mounted dir in the pod(workload)
-MOUNT_PATH = os.environ.get('RANCHER_MOUNT_PATH', "/var/nfs")
+MOUNT_PATH = "/var/nfs"
+# if True then delete the NFS after finishing tests, otherwise False
+DELETE_NFS = eval(os.environ.get('RANCHER_DELETE_NFS', "True"))
 
 
 def test_nfs_wl_deployment():
@@ -152,37 +152,19 @@ def test_nfs_wl_daemonSet():
 
 @pytest.fixture(scope="module", autouse="True")
 def create_project_client(request):
-    client, cluster = get_admin_client_and_cluster()
+    client, cluster = get_user_client_and_cluster()
     create_kubeconfig(cluster)
-    p, ns = create_project_and_ns(ADMIN_TOKEN, cluster, "project-test-nfs")
-    p_client = get_project_client_for_token(p, ADMIN_TOKEN)
+    p, ns = create_project_and_ns(USER_TOKEN, cluster, "project-test-nfs")
+    p_client = get_project_client_for_token(p, USER_TOKEN)
+    nfs_node = provision_nfs_server()
+    nfs_ip = nfs_node.get_public_ip()
+    print("the IP of the NFS: ", nfs_ip)
 
     # add  persistent volume to the cluster
-    cluster_client = get_cluster_client_for_token(cluster, ADMIN_TOKEN)
-    pv_name = random_test_name("pv")
-    pv_config = {"type": "persistentVolume",
-                 "accessModes": ["ReadWriteOnce"],
-                 "name": pv_name,
-                 "nfs": {"readOnly": "false",
-                         "type": "nfsvolumesource",
-                         "path": NFS_SERVER_MOUNT_PATH,
-                         "server": NFS_SERVER
-                         },
-                 "capacity": {"storage": "10Gi"}
-                 }
-    pv_object = cluster_client.create_persistent_volume(pv_config)
-    pv_object = wait_for_pv_to_be_available(cluster_client, pv_object)
+    cluster_client = get_cluster_client_for_token(cluster, USER_TOKEN)
 
-    # add persistent volume claim to the project
-    pvc_name = random_test_name("pvc")
-    pvc_config = {"accessModes": ["ReadWriteOnce"],
-                  "name": pvc_name,
-                  "volumeId": pv_object.id,
-                  "namespaceId": ns.id,
-                  "resources": {"requests": {"storage": "10Gi"}}
-                  }
-    pvc_object = p_client.create_persistent_volume_claim(pvc_config)
-    pvc_object = wait_for_pvc_to_be_bound(p_client, pvc_object)
+    pv_object, pvc_object = create_pv_pvc(p_client, ns, nfs_ip, cluster_client)
+
     namespace["p_client"] = p_client
     namespace["ns"] = ns
     namespace["cluster"] = cluster
@@ -192,7 +174,9 @@ def create_project_client(request):
 
     def fin():
         cluster_client = get_cluster_client_for_token(namespace["cluster"],
-                                                      ADMIN_TOKEN)
+                                                      USER_TOKEN)
         cluster_client.delete(namespace["project"])
         cluster_client.delete(namespace["pv"])
+        if DELETE_NFS is True:
+            AmazonWebServices().delete_node(nfs_node)
     request.addfinalizer(fin)

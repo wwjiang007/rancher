@@ -6,10 +6,10 @@ import (
 	"net"
 	"strings"
 
-	"github.com/rancher/rancher/pkg/controllers/management/globalnamespacerbac"
+	"github.com/rancher/rancher/pkg/controllers/management/rbac"
+	v3 "github.com/rancher/rancher/pkg/generated/norman/management.cattle.io/v3"
 	"github.com/rancher/rancher/pkg/namespace"
-	v3 "github.com/rancher/types/apis/management.cattle.io/v3"
-	"github.com/rancher/types/config"
+	"github.com/rancher/rancher/pkg/types/config"
 	"github.com/sirupsen/logrus"
 
 	"strconv"
@@ -31,28 +31,20 @@ const (
 )
 
 type GDController struct {
-	globalDNSs        v3.GlobalDNSInterface
-	globalDNSLister   v3.GlobalDNSLister
 	ingresses         clientv1beta1.IngressInterface //need to use client-go IngressInterface to update Ingress.Status field
 	managementContext *config.ManagementContext
-	prtbLister        v3.ProjectRoleTemplateBindingLister
-	rtLister          v3.RoleTemplateLister
 }
 
 func newGlobalDNSController(ctx context.Context, mgmt *config.ManagementContext) *GDController {
 	n := &GDController{
-		globalDNSs:        mgmt.Management.GlobalDNSs(namespace.GlobalNamespace),
-		globalDNSLister:   mgmt.Management.GlobalDNSs(namespace.GlobalNamespace).Controller().Lister(),
 		ingresses:         mgmt.K8sClient.ExtensionsV1beta1().Ingresses(namespace.GlobalNamespace),
 		managementContext: mgmt,
-		prtbLister:        mgmt.Management.ProjectRoleTemplateBindings("").Controller().Lister(),
-		rtLister:          mgmt.Management.RoleTemplates("").Controller().Lister(),
 	}
 	return n
 }
 
 //sync is called periodically and on real updates
-func (n *GDController) sync(key string, obj *v3.GlobalDNS) (runtime.Object, error) {
+func (n *GDController) sync(key string, obj *v3.GlobalDns) (runtime.Object, error) {
 	if obj == nil || obj.DeletionTimestamp != nil {
 		return nil, nil
 	}
@@ -61,13 +53,13 @@ func (n *GDController) sync(key string, obj *v3.GlobalDNS) (runtime.Object, erro
 	if err != nil {
 		return nil, err
 	}
-	creatorID, ok := metaAccessor.GetAnnotations()[globalnamespacerbac.CreatorIDAnn]
+	creatorID, ok := metaAccessor.GetAnnotations()[rbac.CreatorIDAnn]
 	if !ok {
 		return nil, fmt.Errorf("GlobalDNS %v has no creatorId annotation", metaAccessor.GetName())
 	}
 
-	if err := globalnamespacerbac.CreateRoleAndRoleBinding(globalnamespacerbac.GlobalDNSResource, obj.Name,
-		globalnamespacerbac.RancherManagementAPIVersion, creatorID, []string{globalnamespacerbac.RancherManagementAPIVersion},
+	if err := rbac.CreateRoleAndRoleBinding(rbac.GlobalDNSResource, v3.GlobalDnsGroupVersionKind.Kind, obj.Name, namespace.GlobalNamespace,
+		rbac.RancherManagementAPIVersion, creatorID, []string{rbac.RancherManagementAPIGroup},
 		obj.UID, obj.Spec.Members, n.managementContext); err != nil {
 		return nil, err
 	}
@@ -106,8 +98,8 @@ func (n *GDController) sync(key string, obj *v3.GlobalDNS) (runtime.Object, erro
 	return nil, nil
 }
 
-func (n *GDController) getIngressForGlobalDNS(globaldns *v3.GlobalDNS) (*v1beta1.Ingress, error) {
-	ingress, err := n.ingresses.Get(strings.Join([]string{"globaldns-ingress", globaldns.Name}, "-"), metav1.GetOptions{}) //n.Get("", strings.Join([]string{"globaldns-ingress", globaldns.Name}, "-"))
+func (n *GDController) getIngressForGlobalDNS(globaldns *v3.GlobalDns) (*v1beta1.Ingress, error) {
+	ingress, err := n.ingresses.Get(context.TODO(), strings.Join([]string{"globaldns-ingress", globaldns.Name}, "-"), metav1.GetOptions{}) //n.Get("", strings.Join([]string{"globaldns-ingress", globaldns.Name}, "-"))
 	if err != nil {
 		return nil, err
 	}
@@ -118,7 +110,7 @@ func (n *GDController) getIngressForGlobalDNS(globaldns *v3.GlobalDNS) (*v1beta1
 	return nil, nil
 }
 
-func (n *GDController) isIngressOwnedByGlobalDNS(ingress *v1beta1.Ingress, globaldns *v3.GlobalDNS) bool {
+func (n *GDController) isIngressOwnedByGlobalDNS(ingress *v1beta1.Ingress, globaldns *v3.GlobalDns) bool {
 	for i, owners := 0, ingress.GetOwnerReferences(); owners != nil && i < len(owners); i++ {
 		if owners[i].UID == globaldns.UID && owners[i].Kind == globaldns.Kind {
 			return true
@@ -127,12 +119,12 @@ func (n *GDController) isIngressOwnedByGlobalDNS(ingress *v1beta1.Ingress, globa
 	return false
 }
 
-func (n *GDController) createIngressForGlobalDNS(globaldns *v3.GlobalDNS) (*v1beta1.Ingress, error) {
+func (n *GDController) createIngressForGlobalDNS(globaldns *v3.GlobalDns) (*v1beta1.Ingress, error) {
 	ingressSpec := n.generateNewIngressSpec(globaldns)
 	if globaldns.Spec.TTL != 0 {
 		ingressSpec.ObjectMeta.Annotations[annotationDNSTTL] = strconv.FormatInt(globaldns.Spec.TTL, 10)
 	}
-	ingressObj, err := n.ingresses.Create(ingressSpec)
+	ingressObj, err := n.ingresses.Create(context.TODO(), ingressSpec, metav1.CreateOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -140,7 +132,7 @@ func (n *GDController) createIngressForGlobalDNS(globaldns *v3.GlobalDNS) (*v1be
 	return ingressObj, nil
 }
 
-func (n *GDController) generateNewIngressSpec(globaldns *v3.GlobalDNS) *v1beta1.Ingress {
+func (n *GDController) generateNewIngressSpec(globaldns *v3.GlobalDns) *v1beta1.Ingress {
 	controller := true
 	return &v1beta1.Ingress{
 		ObjectMeta: metav1.ObjectMeta{
@@ -148,7 +140,7 @@ func (n *GDController) generateNewIngressSpec(globaldns *v3.GlobalDNS) *v1beta1.
 			OwnerReferences: []metav1.OwnerReference{
 				{
 					Name:       globaldns.Name,
-					APIVersion: "v3",
+					APIVersion: globaldns.APIVersion,
 					UID:        globaldns.UID,
 					Kind:       globaldns.Kind,
 					Controller: &controller,
@@ -184,12 +176,12 @@ func (n *GDController) generateNewIngressSpec(globaldns *v3.GlobalDNS) *v1beta1.
 	}
 }
 
-func (n *GDController) updateIngressForDNS(ingress *v1beta1.Ingress, obj *v3.GlobalDNS) error {
+func (n *GDController) updateIngressForDNS(ingress *v1beta1.Ingress, obj *v3.GlobalDns) error {
 	var err error
 
 	if n.ifEndpointsDiffer(ingress.Status.LoadBalancer.Ingress, obj.Status.Endpoints) {
 		ingress.Status.LoadBalancer.Ingress = n.sliceToStatus(obj.Status.Endpoints)
-		ingress, err = n.ingresses.UpdateStatus(ingress)
+		ingress, err = n.ingresses.UpdateStatus(context.TODO(), ingress, metav1.UpdateOptions{})
 
 		if err != nil {
 			return fmt.Errorf("GlobalDNSController: Error updating Ingress %v", err)
@@ -211,7 +203,7 @@ func (n *GDController) updateIngressForDNS(ingress *v1beta1.Ingress, obj *v3.Glo
 	}
 
 	if updateIngress {
-		_, err = n.ingresses.Update(ingress)
+		_, err = n.ingresses.Update(context.TODO(), ingress, metav1.UpdateOptions{})
 		if err != nil {
 			return fmt.Errorf("GlobalDNSController: Error updating Ingress %v", err)
 		}

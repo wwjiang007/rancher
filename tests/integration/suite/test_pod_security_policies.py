@@ -1,8 +1,9 @@
 import kubernetes
-from .conftest import kubernetes_api_client, wait_for
+from .conftest import kubernetes_api_client, wait_for, set_cluster_psp
 from .common import random_str
 from rancher import ApiError
 import pytest
+from kubernetes.client.rest import ApiException
 
 
 def cleanup_pspt(client, request, cluster):
@@ -64,7 +65,7 @@ def service_account_has_role_binding(rbac, pspt):
         rbac.read_namespaced_role_binding("default-asdf-default-" + pspt.id +
                                           "-clusterrole-binding", "default")
         return True
-    except kubernetes.client.rest.ApiException:
+    except ApiException:
         return False
 
 
@@ -91,14 +92,16 @@ def test_service_accounts_have_role_binding(admin_mc, request):
     wait_for(lambda: service_account_has_role_binding(rbac, pspt), timeout=30)
 
 
-def test_pod_security_policy_template_del(admin_mc, admin_pc, remove_resource):
-    """ Test for pod security policy template binding correctly
+@pytest.mark.nonparallel
+def test_pod_security_policy_template_del(admin_mc, admin_pc, remove_resource,
+                                          restore_cluster_psp):
+    """ Test for pod security policy template binding correctly.
+    May have to mark this test as nonparallel if new test are introduced
+    that toggle pspEnabled.
     ref https://github.com/rancher/rancher/issues/15728
     ref https://localhost:8443/v3/podsecuritypolicytemplates
     """
     api_client = admin_mc.client
-    # these create a mock pspts... not valid for real psp's
-
     pspt_proj = create_pspt(api_client)
     # add a finalizer to delete the pspt
     remove_resource(pspt_proj)
@@ -106,6 +109,19 @@ def test_pod_security_policy_template_del(admin_mc, admin_pc, remove_resource):
     #  creates a project and handles cleanup
     proj = admin_pc.project
     # this will retry 3 times if there is an ApiError
+
+    set_cluster_psp(admin_mc, "false")
+
+    with pytest.raises(ApiError) as e:
+        api_client.action(obj=proj,
+                          action_name="setpodsecuritypolicytemplate",
+                          podSecurityPolicyTemplateId=pspt_proj.id)
+    assert e.value.error.status == 422
+    assert "cluster [local] does not have Pod Security Policies enabled" in \
+           e.value.error.message
+
+    set_cluster_psp(admin_mc, "true")
+
     api_client.action(obj=proj, action_name="setpodsecuritypolicytemplate",
                       podSecurityPolicyTemplateId=pspt_proj.id)
     proj = api_client.wait_success(proj)
@@ -144,6 +160,8 @@ def test_pod_security_policy_template_del(admin_mc, admin_pc, remove_resource):
     wait_for(pspt_del_check)
     assert api_client.by_id_pod_security_policy_template(pspt_proj.id) is None
 
+    set_cluster_psp(admin_mc, "false")
+
 
 def test_incorrect_pspt(admin_mc, remove_resource):
     """ Test that incorrect pod security policy templates cannot be created"""
@@ -168,3 +186,160 @@ def test_incorrect_pspt(admin_mc, remove_resource):
         api_client.create_podSecurityPolicyTemplate(**args)
     assert e.value.error.status == 422
     assert e.value.error.code == 'InvalidBodyContent'
+
+
+def test_pspt_binding(admin_mc, admin_pc, remove_resource):
+    """Test that a PSPT binding is validated before creating it"""
+    api_client = admin_mc.client
+
+    # No podSecurityPolicyTemplateId causes a 422
+    name = random_str()
+    with pytest.raises(ApiError) as e:
+        b = api_client.create_podSecurityPolicyTemplateProjectBinding(
+            name=name,
+            namespaceId='default',
+            podSecurityPolicyTemplateId=None,
+            targetProjectId=admin_pc.project.id,
+        )
+        remove_resource(b)
+    assert e.value.error.status == 422
+    assert e.value.error.message == \
+        'missing required podSecurityPolicyTemplateId'
+
+    # An invalid podSecurityPolicyTemplateId causes a 422
+    name = random_str()
+    with pytest.raises(ApiError) as e:
+        b = api_client.create_podSecurityPolicyTemplateProjectBinding(
+            name=name,
+            namespaceId='default',
+            podSecurityPolicyTemplateId='thisdoesntexist',
+            targetProjectId=admin_pc.project.id,
+        )
+        remove_resource(b)
+    assert e.value.error.status == 422
+    assert e.value.error.message == 'podSecurityPolicyTemplate not found'
+
+
+@pytest.mark.nonparallel
+def test_project_action_set_pspt(admin_mc, admin_pc,
+                                 remove_resource, restore_cluster_psp):
+    """Test project's action: setpodsecuritypolicytemplate"""
+    api_client = admin_mc.client
+
+    # these create a mock pspt
+    pspt_proj = create_pspt(api_client)
+    # add a finalizer to delete the pspt
+    remove_resource(pspt_proj)
+    # creates a project
+    proj = admin_pc.project
+
+    set_cluster_psp(admin_mc, "false")
+
+    # Check 1: the action should error out if psp is disabled at cluster level
+    with pytest.raises(ApiError) as e:
+        api_client.action(obj=proj,
+                          action_name="setpodsecuritypolicytemplate",
+                          podSecurityPolicyTemplateId=pspt_proj.id)
+    assert e.value.error.status == 422
+    assert "cluster [local] does not have Pod Security Policies enabled" in \
+           e.value.error.message
+
+    set_cluster_psp(admin_mc, "true")
+
+    # Check 2: the action should succeed if psp is enabled at cluster level
+    # and podSecurityPolicyTemplateId is valid
+    api_client.action(obj=proj,
+                      action_name="setpodsecuritypolicytemplate",
+                      podSecurityPolicyTemplateId=pspt_proj.id)
+    proj = api_client.wait_success(proj)
+    assert proj.state == 'active'
+    assert proj.podSecurityPolicyTemplateId == pspt_proj.id
+
+    def check_psptpb():
+        proj_obj = proj.podSecurityPolicyTemplateProjectBindings()
+        for data in proj_obj.data:
+            if (data.targetProjectId == proj.id and
+                    data.podSecurityPolicyTemplateId == pspt_proj.id):
+                return True
+        return False
+
+    wait_for(check_psptpb, lambda: "PSPTB project binding not found")
+
+    # Check 3: an invalid podSecurityPolicyTemplateId causes 422
+    with pytest.raises(ApiError) as e:
+        api_client.action(obj=proj,
+                          action_name="setpodsecuritypolicytemplate",
+                          podSecurityPolicyTemplateId="doNotExist")
+    assert e.value.error.status == 422
+    assert "podSecurityPolicyTemplate [doNotExist] not found" in \
+           e.value.error.message
+
+    api_client.delete(proj)
+
+    def check_project():
+        return api_client.by_id_project(proj.id) is None
+    wait_for(check_project)
+
+    set_cluster_psp(admin_mc, "false")
+
+
+def test_psp_annotations(admin_mc, remove_resouce_func):
+    """Test that a psp with a pspt owner annotation will get cleaned up if the
+    parent pspt does not exist"""
+    k8s_client = kubernetes_api_client(admin_mc.client, 'local')
+    policy = kubernetes.client.PolicyV1beta1Api(api_client=k8s_client)
+    kubernetes.client.PolicyV1beta1PodSecurityPolicy
+    psp_name = random_str()
+    args = {
+        'metadata': {
+            'name': psp_name
+        },
+        'spec': {
+            "allowPrivilegeEscalation": True,
+            "fsGroup": {
+                "rule": "RunAsAny"
+            },
+            "runAsUser": {
+                "rule": "RunAsAny"
+            },
+            "seLinux": {
+                "rule": "RunAsAny"
+            },
+            "supplementalGroups": {
+                "rule": "RunAsAny"
+            },
+            "volumes": [
+                "*"
+            ]
+        }
+    }
+
+    psp = policy.create_pod_security_policy(args)
+    remove_resouce_func(policy.delete_pod_security_policy, psp_name)
+    psp = policy.read_pod_security_policy(psp_name)
+    assert psp is not None
+
+    anno = {
+        'metadata': {
+            'annotations': {
+                'serviceaccount.cluster.cattle.io/pod-security': 'doesntexist'
+            }
+        }
+    }
+    # Add the annotation the controller is looking for
+    psp = policy.patch_pod_security_policy(psp_name, anno)
+
+    # Controller will delete the PSP as the parent PSPT doesn't exist
+    def _get_psp():
+        try:
+            policy.read_pod_security_policy(psp_name)
+            return False
+        except ApiException as e:
+            if e.status != 404:
+                raise e
+            return True
+    wait_for(_get_psp, fail_handler=lambda: "psp was not cleaned up")
+
+    with pytest.raises(ApiException) as e:
+        policy.read_pod_security_policy(psp_name)
+    assert e.value.status == 404

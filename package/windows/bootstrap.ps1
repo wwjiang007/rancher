@@ -9,35 +9,75 @@ $VerbosePreference = 'SilentlyContinue'
 $DebugPreference = 'SilentlyContinue'
 $InformationPreference = 'SilentlyContinue'
 
+Import-Module -WarningAction Ignore -Name "$PSScriptRoot\utils.psm1"
+$CATTLE_PREFIX_PATH = Get-Env -Key "CATTLE_PREFIX_PATH"
+
+# parse arguments
+$vals = $null
+for ($i = $args.Length; $i -ge 0; $i--)
+{
+    $arg = $args[$i]
+    switch -regex ($arg)
+    {
+        '^(--prefix-path)$' {
+            $CATTLE_PREFIX_PATH = ($vals | Select-Object -First 1)
+            $vals = $null
+        }
+        default {
+			if ($vals) {
+				$vals = ,$arg + $vals
+			} else {
+				$vals = @($arg)
+			}
+		}
+	}
+}
+
+if ([string]::IsNullOrEmpty($CATTLE_PREFIX_PATH)) {
+	$CATTLE_PREFIX_PATH = "c:\"
+}
+
+if ($CATTLE_PREFIX_PATH.Chars($CATTLE_PREFIX_PATH.Length - 1) -ne '\') {
+    # confirm trailing slash for path building below
+    $CATTLE_PREFIX_PATH = ($CATTLE_PREFIX_PATH + '\')
+}
+
+$hostPrefixPath = $CATTLE_PREFIX_PATH -Replace "c:\\", "c:\host\"
+
+
 # create directories on the host
 # windows docker only can mount the existing path into container
 try
 {
     New-Item -Force -ItemType Directory -Path @(
-        "c:\host\opt"
-        "c:\host\opt\cni"
-        "c:\host\opt\cni\bin"
-        "c:\host\etc"
-        "c:\host\etc\rancher"
-        "c:\host\etc\kubernetes"
-        "c:\host\etc\cni"
-        "c:\host\etc\cni\net.d"
-        "c:\host\etc\nginx"
-        "c:\host\etc\nginx\logs"
-        "c:\host\etc\nginx\temp"
-        "c:\host\etc\nginx\conf"
-        "c:\host\etc\kube-flannel"
-        "c:\host\var"
-        "c:\host\var\run"
-        "c:\host\var\log"
-        "c:\host\var\log\pods"
-        "c:\host\var\log\containers"
-        "c:\host\var\lib"
-        "c:\host\var\lib\cni"
-        "c:\host\var\lib\rancher"
-        "c:\host\var\lib\kubelet"
-        "c:\host\var\lib\kubelet\volumeplugins"
-        "c:\host\run"
+        "$($hostPrefixPath)opt"
+        "$($hostPrefixPath)opt\bin"
+        "$($hostPrefixPath)opt\cni"
+        "$($hostPrefixPath)opt\cni\bin"
+        "$($hostPrefixPath)etc"
+        "$($hostPrefixPath)etc\rancher"
+        "$($hostPrefixPath)etc\rancher\wins"
+        "$($hostPrefixPath)etc\kubernetes"
+        "$($hostPrefixPath)etc\kubernetes\bin"
+        "$($hostPrefixPath)etc\cni"
+        "$($hostPrefixPath)etc\cni\net.d"
+        "$($hostPrefixPath)etc\nginx"
+        "$($hostPrefixPath)etc\nginx\logs"
+        "$($hostPrefixPath)etc\nginx\temp"
+        "$($hostPrefixPath)etc\nginx\conf"
+        "$($hostPrefixPath)etc\kube-flannel"
+        "$($hostPrefixPath)var"
+        "$($hostPrefixPath)var\run"
+        "$($hostPrefixPath)var\log"
+        "$($hostPrefixPath)var\log\pods"
+        "$($hostPrefixPath)var\log\containers"
+        "$($hostPrefixPath)var\lib"
+        "$($hostPrefixPath)var\lib\cni"
+        "$($hostPrefixPath)var\lib\rancher"
+        "$($hostPrefixPath)var\lib\kubelet"
+        "$($hostPrefixPath)var\lib\kubelet\volumeplugins"
+        "$($hostPrefixPath)run"
+        "c:\host\ProgramData\docker\certs.d"
     ) | Out-Null
 } catch { }
 
@@ -45,22 +85,14 @@ try
 # wins needs to run as a server on the host to accept the request from container
 try
 {
-    Copy-Item -Force -Destination "c:\host\etc\rancher" -Path @(
+    Copy-Item -Force -Destination "$($hostPrefixPath)etc\rancher" -Path @(
         "c:\etc\rancher\utils.psm1"
         "c:\etc\rancher\cleanup.ps1"
         "c:\Windows\wins.exe"
     )
 } catch { }
 
-$processWhitePaths = @(
-    "--wl-process-path c:\etc\wmi-exporter\wmi-exporter.exe"
-    "--wl-process-path c:\etc\kubernetes\bin\kube-proxy.exe"
-    "--wl-process-path c:\etc\kubernetes\bin\kubelet.exe"
-    "--wl-process-path c:\etc\nginx\nginx.exe"
-    "--wl-process-path c:\opt\bin\flanneld.exe"
-)
-
-$verfication = @"
+$verification = @"
 Log-Info "Detecting running permission ..."
 if (-not (Is-Administrator))
 {
@@ -74,8 +106,8 @@ try
     if (`$cpuLogicalProccessors -le 1) {
         Log-Fatal "The CPU resource could not satisfy the default reservation for both Windows system and Kuberentes components, please increase the CPU resource to more than 2 logic processors"
     } elseif (`$cpuLogicalProccessors -lt 2) {
-        Log-Warn "The CPU resource only satisfy the lowest limit of running Kubernetes components"
-        Log-Warn "Please increase the CPU resource to more than 2 logic processors if could not schedual Pods in this Node"
+        Log-Warn "The CPU resource only satisfies the lowest limit for running Kubernetes components"
+        Log-Warn "Please increase the CPU resource to more than 2 logic processors if you are unable to schedule Pods on this Node"
     }
 }
 catch
@@ -95,15 +127,15 @@ try
 
     `$ramTotalGB = `$(Get-WmiObject -Class Win32_ComputerSystem | Select-Object -ExpandProperty TotalPhysicalMemory)/1GB
     if (`$ramTotalGB -lt `$lowestLimitGB) {
-        Log-Fatal "The RAM resource could not satisfy the default reservation for both Windows system and Kuberentes components, please increase the RAM resource to more than `$lowestLimitGB GB"
+        Log-Fatal "The RAM resource could not satisfy the default reservation for both Windows system and Kubernetes components, please increase the RAM resource to more than `$lowestLimitGB GB"
     }
 
     `$ramAvailableMB = `$(Get-WmiObject -Class Win32_PerfFormattedData_PerfOS_Memory | Measure-Object -Sum -Property AvailableBytes | Select-Object -ExpandProperty Sum)/1MB
     if (`$ramAvailableMB -le 500) {
         Log-Fatal "The RAM resource could not satisfy the default reservation for Kuberentes components, please increase the RAM resource to more than `$lowestLimitGB GB"
     } elseif (`$ramAvailableMB -le 600) {
-        Log-Warn "The RAM resource only satisfy the lowest limit of running Kubernetes components"
-        Log-Warn "Please increase the RAM resource to more than `$lowestLimitGB GB if could not schedual Pods in this Node"
+        Log-Warn "The RAM resource only satisfies the lowest limit for running Kubernetes components"
+        Log-Warn "Please increase the RAM resource to more than `$lowestLimitGB GB if you are unable to schedule Pods on this Node"
     }
 }
 catch
@@ -116,22 +148,15 @@ try
 {
     `$diskAvaliableGB = `$(Get-WmiObject -Class Win32_LogicalDisk | Where-Object {`$_.DeviceID -eq "C:"} | Select-Object -ExpandProperty Size)/1GB
     if (`$diskAvaliableGB -lt 29.5) {
-        Log-Fatal "The DISK resource could not satisfy the default reservation for both Windows system and Kuberentes components, please increase the DISK resource to more than 30 GB"
+        Log-Fatal "The DISK resource could not satisfy the default reservation for both Windows system and Kubernetes components, please increase the DISK resource to more than 30 GB"
     } elseif (`$diskAvaliableGB -lt 49.5) {
-        Log-Warn "The DISK resource only satisfy the lowest limit of running Kubernetes components"
-        Log-Warn "Please increase the DISK resource to more than 50 GB if could not schedual Pods in this Node"
+        Log-Warn "The DISK resource only satisfies the lowest limit for running Kubernetes components"
+        Log-Warn "Please increase the DISK resource to more than 50 GB if you are unable to schedule Pods on this Node"
     }
 }
 catch
 {
     Log-Warn "Could not detect the DISK resource: `$(`$_.Exception.Message)"
-}
-
-Log-Info "Detecting host system locale ..."
-`$sysLocale = Get-WinSystemLocale | Select-Object -ExpandProperty "IetfLanguageTag"
-if (-not `$sysLocale.StartsWith('en-'))
-{
-    Log-Fatal "Only support with English System Locale"
 }
 
 Log-Info "Detecting host Docker name pipe existing ..."
@@ -189,12 +214,12 @@ if (`$svcMsiscsi -and (`$svcMsiscsi.Status -ne "Running"))
 }
 "@
 
-# allow user to disable the verfication
+# allow user to disable the verification
 if ($env:WITHOUT_VERIFICATION -eq "true") {
-    $verfication = ""
+    $verification = ""
 }
 
-Out-File -Encoding ascii -FilePath "c:\host\etc\rancher\bootstrap.ps1" -InputObject @"
+Out-File -Encoding ascii -FilePath "$($hostPrefixPath)etc\rancher\bootstrap.ps1" -InputObject @"
 `$ErrorActionPreference = 'Stop'
 `$WarningPreference = 'SilentlyContinue'
 `$VerbosePreference = 'SilentlyContinue'
@@ -207,7 +232,7 @@ Import-Module -WarningAction Ignore -Name "`$PSScriptRoot\utils.psm1"
 # remove script
 Remove-Item -Force -Path "`$PSScriptRoot\bootstrap.ps1" -ErrorAction Ignore
 
-$verfication
+$verification
 
 # repair Get-GcePdName method
 # this's a stopgap, we could drop this after https://github.com/kubernetes/kubernetes/issues/74674 fixed
@@ -223,7 +248,7 @@ if (-not `$getGcePodNameCommand)
 Unblock-File -Path DLLPATH -ErrorAction Ignore
 Import-Module -Name DLLPATH -ErrorAction Ignore
 '@
-    Add-Content -Path `$profilePath -Value `$appendProfile.replace('DLLPATH', "c:\run\GetGcePdName.dll") -ErrorAction Ignore
+    Add-Content -Path `$profilePath -Value `$appendProfile.replace('DLLPATH', "$($CATTLE_PREFIX_PATH)run\GetGcePdName.dll") -ErrorAction Ignore
 }
 
 # clean up the stale HNS network if required
@@ -249,10 +274,23 @@ catch
     Log-Warn "Could not clean: `$(`$_.Exception.Message)"
 }
 
+# output wins config
+@{
+    whiteList = @{
+        processPaths = @(
+            "$($CATTLE_PREFIX_PATH)etc\wmi-exporter\wmi-exporter.exe"
+            "$($CATTLE_PREFIX_PATH)etc\kubernetes\bin\kube-proxy.exe"
+            "$($CATTLE_PREFIX_PATH)etc\kubernetes\bin\kubelet.exe"
+            "$($CATTLE_PREFIX_PATH)etc\nginx\nginx.exe"
+            "$($CATTLE_PREFIX_PATH)opt\bin\flanneld.exe"
+        )
+    }
+} | ConvertTo-Json -Compress -Depth 32 | Out-File -NoNewline -Encoding utf8 -Force -FilePath "$($CATTLE_PREFIX_PATH)etc\rancher\wins\config"
+
 # register wins
 Start-Process -NoNewWindow -Wait ``
-    -FilePath "c:\etc\rancher\wins.exe" ``
-    -ArgumentList "srv app run --register $($processWhitePaths -join ' ')"
+    -FilePath "$($CATTLE_PREFIX_PATH)etc\rancher\wins.exe" ``
+    -ArgumentList "srv app run --register"
 
 # start wins
 Start-Service -Name "rancher-wins" -ErrorAction Ignore
@@ -260,7 +298,9 @@ Start-Service -Name "rancher-wins" -ErrorAction Ignore
 # run agent
 Start-Process -NoNewWindow -Wait ``
     -FilePath "docker.exe" ``
-    -ArgumentList "run -d --restart=unless-stopped -v //./pipe/docker_engine://./pipe/docker_engine -v c:/etc/kubernetes:c:/etc/kubernetes -v //./pipe/rancher_wins://./pipe/rancher_wins $($env:AGENT_IMAGE) execute $($args -join " ")"
+    -ArgumentList "run -d --restart=unless-stopped -e CATTLE_PREFIX_PATH=$CATTLE_PREFIX_PATH -v \\.\pipe\docker_engine:\\.\pipe\docker_engine -v c:\ProgramData\docker\certs.d:c:\etc\docker\certs.d -v $($CATTLE_PREFIX_PATH)etc\kubernetes:c:\etc\kubernetes -v \\.\pipe\rancher_wins:\\.\pipe\rancher_wins -v $($CATTLE_PREFIX_PATH)etc\rancher\wins:c:\etc\rancher\wins $($env:AGENT_IMAGE) execute $($args -join " ")"
 "@
 
-Write-Output -InputObject "c:\etc\rancher\bootstrap.ps1"
+
+Write-Output -InputObject "$($CATTLE_PREFIX_PATH)etc\rancher\bootstrap.ps1"
+

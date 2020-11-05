@@ -9,17 +9,22 @@ import (
 	"os"
 	"path/filepath"
 
+	rketypes "github.com/rancher/rke/types"
+
 	"context"
 
 	"fmt"
+	"reflect"
+	"sort"
+	"strings"
+	"time"
 
 	"github.com/ghodss/yaml"
-	"github.com/rancher/kontainer-engine/drivers/rke/rkecerts"
 	"github.com/rancher/norman/types"
+	"github.com/rancher/rancher/pkg/kontainer-engine/drivers/rke/rkecerts"
 	"github.com/rancher/rancher/pkg/librke"
 	"github.com/rancher/rke/pki"
 	"github.com/rancher/rke/pki/cert"
-	v3 "github.com/rancher/types/apis/management.cattle.io/v3"
 	"github.com/sirupsen/logrus"
 	k8sclientv1 "k8s.io/client-go/tools/clientcmd/api/v1"
 )
@@ -61,7 +66,7 @@ func LoadLocal() (*Bundle, error) {
 	return NewBundle(certMap), nil
 }
 
-func Generate(config *v3.RancherKubernetesEngineConfig) (*Bundle, error) {
+func Generate(config *rketypes.RancherKubernetesEngineConfig) (*Bundle, error) {
 	certs, err := librke.New().GenerateCerts(config)
 	if err != nil {
 		return nil, err
@@ -72,21 +77,29 @@ func Generate(config *v3.RancherKubernetesEngineConfig) (*Bundle, error) {
 	}, nil
 }
 
-func (b *Bundle) Marshal() (string, error) {
+// SafeMarshal removes the kube-ca cert key and keyPEM from the cert bundle before marshalling
+func (b *Bundle) SafeMarshal() (string, error) {
 	output := &bytes.Buffer{}
-	err := rkecerts.Save(b.certs, output)
+	certs := b.certs
+	if caCert, ok := certs[pki.CACertName]; ok {
+		caCert.Key = nil
+		caCert.KeyPEM = ""
+		certs[pki.CACertName] = caCert
+	}
+	err := rkecerts.Save(certs, output)
 	return output.String(), err
+
 }
 
-func (b *Bundle) ForNode(config *v3.RancherKubernetesEngineConfig, nodeAddress string) *Bundle {
+func (b *Bundle) ForNode(config *rketypes.RancherKubernetesEngineConfig, nodeAddress string) *Bundle {
 	certs := librke.New().GenerateRKENodeCerts(context.Background(), *config, nodeAddress, b.certs)
 	return &Bundle{
 		certs: certs,
 	}
 }
 
-func (b *Bundle) ForWindowsNode(config *v3.RancherKubernetesEngineConfig, nodeAddress string) *Bundle {
-	nb := b.ForNode(config, nodeAddress)
+func (b *Bundle) ForWindowsNode(rkeconfig *rketypes.RancherKubernetesEngineConfig, nodeAddress string) *Bundle {
+	nb := b.ForNode(rkeconfig, nodeAddress)
 
 	certs := make(map[string]pki.CertificatePKI, len(nb.certs))
 	for key, cert := range nb.certs {
@@ -99,7 +112,11 @@ func (b *Bundle) ForWindowsNode(config *v3.RancherKubernetesEngineConfig, nodeAd
 					cluster := &config.Clusters[i].Cluster
 
 					if len(cluster.CertificateAuthority) != 0 {
-						cluster.CertificateAuthority = "c:" + cluster.CertificateAuthority
+						if rkeconfig.WindowsPrefixPath != "" {
+							cluster.CertificateAuthority = rkeconfig.WindowsPrefixPath + cluster.CertificateAuthority
+						} else {
+							cluster.CertificateAuthority = "c:" + cluster.CertificateAuthority
+						}
 					}
 				}
 
@@ -108,11 +125,20 @@ func (b *Bundle) ForWindowsNode(config *v3.RancherKubernetesEngineConfig, nodeAd
 					authInfo := &config.AuthInfos[i].AuthInfo
 
 					if len(authInfo.ClientCertificate) != 0 {
-						authInfo.ClientCertificate = "c:" + authInfo.ClientCertificate
+						if rkeconfig.WindowsPrefixPath != "" {
+							authInfo.ClientCertificate = rkeconfig.WindowsPrefixPath + authInfo.ClientCertificate
+						} else {
+							authInfo.ClientCertificate = "c:" + authInfo.ClientCertificate
+						}
 					}
 
 					if len(authInfo.ClientKey) != 0 {
-						authInfo.ClientKey = "c:" + authInfo.ClientKey
+						if rkeconfig.WindowsPrefixPath != "" {
+							authInfo.ClientKey = rkeconfig.WindowsPrefixPath + authInfo.ClientKey
+
+						} else {
+							authInfo.ClientKey = "c:" + authInfo.ClientKey
+						}
 					}
 				}
 
@@ -173,6 +199,10 @@ func (b *Bundle) Explode() error {
 func (b *Bundle) Changed() bool {
 	var newCertPEM string
 	for _, item := range b.certs {
+		// Skip empty kube-kubelet certificates that are created for other workers
+		if item.Name == "" {
+			continue
+		}
 		oldCertPEM, err := ioutil.ReadFile(item.Path)
 		if err != nil {
 			logrus.Warnf("Unable to read certificate %s: %v", item.Name, err)
@@ -181,10 +211,43 @@ func (b *Bundle) Changed() bool {
 		if item.Certificate != nil {
 			newCertPEM = string(cert.EncodeCertPEM(item.Certificate))
 		}
+
+		// kube-kubelet certificates will always be different as they are created on-demand, we need to limit replacing them only if its absolutely necessary
+		if strings.HasPrefix(item.Name, "kube-kubelet") {
+			// Check if expired
+			oldCertX509, err := cert.ParseCertsPEM(oldCertPEM)
+			if err != nil {
+				logrus.Errorf("Error parsing old certificate PEM for [%s]: %v", item.Name, err)
+			}
+			now := time.Now()
+			if len(oldCertX509) > 0 {
+				if now.After(oldCertX509[0].NotAfter) {
+					logrus.Infof("Bundle changed: now [%v] is after certificate NotAfter [%v] for certificate [%s]", now, oldCertX509[0].NotAfter, item.Name)
+					return true
+				}
+			}
+			// Check if AltNames changed
+			if newCertPEM != "" {
+				newCertX509, err := cert.ParseCertsPEM([]byte(newCertPEM))
+				if err != nil {
+					logrus.Errorf("Error parsing new certificate PEM for [%s]: %v", item.Name, err)
+				}
+				if len(newCertX509) > 0 {
+					sort.Strings(oldCertX509[0].DNSNames)
+					sort.Strings(newCertX509[0].DNSNames)
+					if !reflect.DeepEqual(oldCertX509[0].DNSNames, newCertX509[0].DNSNames) || !pki.DeepEqualIPsAltNames(oldCertX509[0].IPAddresses, newCertX509[0].IPAddresses) {
+						logrus.Infof("Bundle changed: DNSNames and/or IPAddresses changed for certificate [%s]: oldCert.DNSNames %v, newCert.DNSNames %v, oldCert.IPAddresses %v, newCert.IPAddresses %v", item.Name, oldCertX509[0].DNSNames, newCertX509[0].DNSNames, oldCertX509[0].IPAddresses, newCertX509[0].IPAddresses)
+						return true
+					}
+				}
+			}
+			continue
+		}
 		oldCertChecksum := fmt.Sprintf("%x", md5.Sum([]byte(oldCertPEM)))
 		newCertChecksum := fmt.Sprintf("%x", md5.Sum([]byte(newCertPEM)))
 
 		if oldCertChecksum != newCertChecksum {
+			logrus.Infof("Certificate checksum changed (old: [%s], new [%s]) for [%s]", oldCertChecksum, newCertChecksum, item.Name)
 			return true
 		}
 	}

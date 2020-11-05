@@ -15,6 +15,7 @@ const (
 	rancherCredentialsFolder = "/cattle-credentials"
 	urlFilename              = "url"
 	tokenFilename            = "token"
+	namespaceFilename        = "namespace"
 
 	kubernetesServiceHostKey = "KUBERNETES_SERVICE_HOST"
 	kubernetesServicePortKey = "KUBERNETES_SERVICE_PORT"
@@ -22,6 +23,14 @@ const (
 	tokenFile  = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 	rootCAFile = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 )
+
+func Namespace() (string, error) {
+	ns, err := readKey(namespaceFilename)
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	return ns, err
+}
 
 func TokenAndURL() (string, string, error) {
 	url, err := readKey(urlFilename)

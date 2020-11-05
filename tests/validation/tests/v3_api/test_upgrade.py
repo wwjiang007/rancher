@@ -70,26 +70,12 @@ app_create_name = create_prefix + "-app"
 app_validate_name = validate_prefix + "-app"
 # the pre_upgrade_externalId is for launching an app
 pre_upgrade_externalId = \
-    "catalog://?catalog=library&template=mysql&version=0.3.7"
+    create_catalog_external_id("test-catalog", "mysql", "1.3.1")
 # the post_upgrade_externalId is for upgrading the existing app
 post_upgrade_externalId = \
-    "catalog://?catalog=library&template=mysql&version=0.3.8"
-
-# Answers for mysql app
-app_answers = {
-    "defaultImage": "true",
-    "image": "mysql",
-    "imageTag": "5.7.14",
-    "mysqlDatabase": "admin",
-    "mysqlPassword": "",
-    "mysqlUser": "admin",
-    "persistence.enabled": "false",
-    "persistence.size": "8Gi",
-    "persistence.storageClass": "",
-    "service.nodePort": "",
-    "service.port": "3306",
-    "service.type": "ClusterIP"
-}
+    create_catalog_external_id("test-catalog", "mysql", "1.3.2")
+catalogUrl = "https://github.com/rancher/integration-test-charts.git"
+catalogBranch = "validation-tests"
 
 if_post_upgrade = pytest.mark.skipif(
     upgrade_check_stage != "postupgrade",
@@ -120,7 +106,7 @@ def test_validate_existing_wl():
 @if_post_upgrade
 @pytest.mark.run(order=2)
 def test_validate_existing_service_discovery():
-    validate_service_discovery(sd_name_validate,
+    validate_service_discovery_upgrade(sd_name_validate,
                                [sd_wlname1_validate, sd_wlname2_validate])
 
 
@@ -131,6 +117,9 @@ def test_validate_existing_wl_with_secret():
         secret_wl_name1_validate, secret_wl_name2_validate)
 
 
+# It's hard to find an App to support Windows case for now.
+# Could we make an App to support both Windows and Linux?
+@skip_test_windows_os
 @if_post_upgrade
 @pytest.mark.run(order=2)
 def test_validate_existing_catalog_app():
@@ -171,6 +160,9 @@ def test_modify_workload_validate_secret():
     modify_workload_validate_secret()
 
 
+# It's hard to find an App to support Windows case for now.
+# Could we make an App to support both Windows and Linux?
+@skip_test_windows_os
 @if_post_upgrade
 @pytest.mark.run(order=3)
 def test_modify_catalog_app():
@@ -216,9 +208,17 @@ def test_create_and_validate_ingress_xip_io_wl():
     create_and_validate_ingress_xip_io_wl()
 
 
+# It's hard to find an App to support Windows case for now.
+# Could we make an App to support both Windows and Linux?
+@skip_test_windows_os
 @pytest.mark.run(order=5)
 def test_create_and_validate_catalog_app():
     create_and_validate_catalog_app()
+
+
+@pytest.mark.run(order=6)
+def test_create_and_validate_ip_address_pods():
+    create_and_validate_ip_address_pods()
 
 
 # the flag if_upgarde_rancher is false all the time
@@ -227,7 +227,7 @@ def test_create_and_validate_catalog_app():
 @if_upgrade_rancher
 def test_rancher_upgrade():
     upgrade_rancher_server(CATTLE_TEST_URL)
-    client = get_admin_client()
+    client = get_user_client()
     version = client.list_setting(name="server-version").data[0].value
     assert version == upgradeVersion
 
@@ -251,7 +251,7 @@ def validate_wl(workload_name, pod_count=2):
     workload = workloads[0]
     validate_workload(
         p_client, workload, "deployment", ns.name, pod_count=pod_count)
-    validate_service_discovery(workload_name, [workload_name])
+    validate_service_discovery_upgrade(workload_name, [workload_name])
 
 
 def create_and_validate_ingress_xip_io_daemon():
@@ -346,8 +346,9 @@ def modify_workload_validate_sd():
     p_client.update(sd_workload, scale=3, containers=sd_workload.containers)
     validate_wl(sd_wlname2_validate, 3)
 
-    validate_service_discovery(sd_name_validate,
-                               [sd_wlname1_validate, sd_wlname2_validate])
+    validate_service_discovery_upgrade(sd_name_validate,
+                                       [sd_wlname1_validate,
+                                        sd_wlname2_validate])
 
 
 def modify_workload_validate_secret():
@@ -421,11 +422,11 @@ def create_and_validate_service_discovery():
               "namespaceId": ns.id}
 
     create_dns_record(record, p_client)
-    validate_service_discovery(sd_name_create,
-                               [sd_wlname1_create, sd_wlname2_create])
+    validate_service_discovery_upgrade(sd_name_create,
+                                       [sd_wlname1_create, sd_wlname2_create])
 
 
-def validate_service_discovery(sd_record_name, workload_names):
+def validate_service_discovery_upgrade(sd_record_name, workload_names):
     p_client = namespace["p_client"]
     ns = namespace["ns"]
     target_wls = []
@@ -472,20 +473,29 @@ def create_validate_wokloads_with_secret():
 
 @pytest.fixture(scope='module', autouse="True")
 def create_project_client(request):
-    client = get_admin_client()
+    client = get_user_client()
+    admin_client = get_admin_client()
     clusters = client.list_cluster(name=cluster_name).data
     assert len(clusters) == 1
     cluster = clusters[0]
     create_kubeconfig(cluster)
     namespace["cluster"] = cluster
+    if len(admin_client.list_catalog(name="test-catalog")) == 0:
+        catalog = admin_client.create_catalog(
+            name="test-catalog",
+            baseType="catalog",
+            branch=catalogBranch,
+            kind="helm",
+            url=catalogUrl)
+        catalog = wait_for_catalog_active(admin_client, catalog)
 
 
 def create_project_resources():
     cluster = namespace["cluster"]
-    p, ns = create_project_and_ns(ADMIN_TOKEN, cluster,
+    p, ns = create_project_and_ns(USER_TOKEN, cluster,
                                   project_name=create_prefix + project_name,
                                   ns_name=create_prefix + ns_name1)
-    p_client = get_project_client_for_token(p, ADMIN_TOKEN)
+    p_client = get_project_client_for_token(p, USER_TOKEN)
 
     namespace["p_client"] = p_client
     namespace["ns"] = ns
@@ -511,7 +521,7 @@ def create_project_resources():
     pod = wait_for_pod_to_running(p_client, pods[0])
     namespace["testclient_pods"].append(pod)
 
-    new_ns = create_ns(get_cluster_client_for_token(cluster, ADMIN_TOKEN),
+    new_ns = create_ns(get_cluster_client_for_token(cluster, USER_TOKEN),
                        cluster, p, ns_name=create_prefix + ns_name2)
 
     workload = p_client.create_workload(name=wlname,
@@ -532,14 +542,14 @@ def validate_existing_project_resources():
     ns2_name = validate_prefix + ns_name2
 
     # Get existing project
-    client = get_admin_client()
+    client = get_user_client()
     projects = client.list_project(name=p_name,
                                    clusterId=cluster.id).data
     assert len(projects) == 1
     project = projects[0]
 
-    c_client = get_cluster_client_for_token(cluster, ADMIN_TOKEN)
-    p_client = get_project_client_for_token(project, ADMIN_TOKEN)
+    c_client = get_cluster_client_for_token(cluster, USER_TOKEN)
+    p_client = get_project_client_for_token(project, USER_TOKEN)
 
     # Get existing namespace
     nss = c_client.list_namespace(name=ns_name).data
@@ -620,10 +630,12 @@ def upgrade_rancher_server(serverIp,
 def create_and_validate_catalog_app():
     cluster = namespace["cluster"]
     p_client = namespace['p_client']
-    ns = create_ns(get_cluster_client_for_token(cluster, ADMIN_TOKEN),
+    ns = create_ns(get_cluster_client_for_token(cluster, USER_TOKEN),
                    cluster, namespace["project"], ns_name=app_ns)
+    print(pre_upgrade_externalId)
     app = p_client.create_app(
-        answers=app_answers,
+        answers=get_defaut_question_answers(get_user_client(),
+                                            pre_upgrade_externalId),
         externalId=pre_upgrade_externalId,
         name=app_create_name,
         projectId=namespace["project"].id,
@@ -638,7 +650,9 @@ def modify_catalog_app():
     app = wait_for_app_to_active(p_client, app_validate_name)
     # upgrade the catalog app to a newer version
     p_client.action(obj=app, action_name="upgrade",
-                    answers=app_answers,
+                    answers=get_defaut_question_answers(
+                        get_user_client(),
+                        post_upgrade_externalId),
                     externalId=post_upgrade_externalId)
     validate_catalog_app(app.name, post_upgrade_externalId)
 
@@ -658,3 +672,10 @@ def validate_catalog_app(app_name, external_id):
         assert wl.state == "active"
         assert wl.workloadLabels.chart == chart, \
             "the chart version is wrong"
+
+
+def create_and_validate_ip_address_pods():
+    get_pods = "get pods --all-namespaces -o wide | grep ' 172.17'"
+    pods_result = execute_kubectl_cmd(get_pods, json_out=False, stderr=True)
+    print(pods_result.decode('ascii'))
+    assert pods_result.decode('ascii') is '', "Pods have 172 IP address"
