@@ -66,16 +66,24 @@ var (
 	AgentImage          = NewSetting("agent-image", "rancher/rancher-agent:head")
 	AgentRolloutTimeout = NewSetting("agent-rollout-timeout", "300s")
 	// AgentTLSMode is translated to the environment variable STRICT_VERIFY when rendering the cluster/node agent manifests and should not be specified as a default agent setting as it has no direct effect on the agent itself.
-	AgentTLSMode                        = NewSetting("agent-tls-mode", AgentTLSModeStrict).WithDefaultOnUpgrade(AgentTLSModeSystemStore)
-	AuthImage                           = NewSetting("auth-image", v32.ToolsSystemImages.AuthSystemImages.KubeAPIAuth)
-	AuthorizationCacheTTLSeconds        = NewSetting("authorization-cache-ttl-seconds", "10")
-	AuthorizationDenyCacheTTLSeconds    = NewSetting("authorization-deny-cache-ttl-seconds", "10")
-	AzureGroupCacheSize                 = NewSetting("azure-group-cache-size", "10000")
-	CACerts                             = NewSetting("cacerts", "")
-	CLIURLDarwin                        = NewSetting("cli-url-darwin", "https://releases.rancher.com/cli/v1.0.0-alpha8/rancher-darwin-amd64-v1.0.0-alpha8.tar.gz")
-	CLIURLLinux                         = NewSetting("cli-url-linux", "https://releases.rancher.com/cli/v1.0.0-alpha8/rancher-linux-amd64-v1.0.0-alpha8.tar.gz")
-	CLIURLWindows                       = NewSetting("cli-url-windows", "https://releases.rancher.com/cli/v1.0.0-alpha8/rancher-windows-386-v1.0.0-alpha8.zip")
-	ClusterControllerStartCount         = NewSetting("cluster-controller-start-count", "50")
+	AgentTLSMode                     = NewSetting("agent-tls-mode", AgentTLSModeStrict).WithDefaultOnUpgrade(AgentTLSModeSystemStore)
+	AuthImage                        = NewSetting("auth-image", v32.ToolsSystemImages.AuthSystemImages.KubeAPIAuth)
+	AuthorizationCacheTTLSeconds     = NewSetting("authorization-cache-ttl-seconds", "10")
+	AuthorizationDenyCacheTTLSeconds = NewSetting("authorization-deny-cache-ttl-seconds", "10")
+	AzureGroupCacheSize              = NewSetting("azure-group-cache-size", "10000")
+	CACerts                          = NewSetting("cacerts", "")
+	CLIURLDarwin                     = NewSetting("cli-url-darwin", "https://releases.rancher.com/cli/v1.0.0-alpha8/rancher-darwin-amd64-v1.0.0-alpha8.tar.gz")
+	CLIURLLinux                      = NewSetting("cli-url-linux", "https://releases.rancher.com/cli/v1.0.0-alpha8/rancher-linux-amd64-v1.0.0-alpha8.tar.gz")
+	CLIURLWindows                    = NewSetting("cli-url-windows", "https://releases.rancher.com/cli/v1.0.0-alpha8/rancher-windows-386-v1.0.0-alpha8.zip")
+	ClusterControllerStartCount      = NewSetting("cluster-controller-start-count", "50")
+	// DisableLocalAuthProvider is the boolean flag controlling partial
+	// disabling of the local auth provider, from the perspective of
+	// users. It does not does disable internal uses of the provider. By
+	// default `false`, keeping the provider fully active. When set to
+	// `true` the dashboard is expected to prevent logins with local user
+	// accounts, and prevent changes to local user accounts. The webhook
+	// uses this to prevent the same kind of changes, handling operations
+	// from outside the dahsboard, and misbehaviour by the dashboard itself.
 	DisableLocalAuthProvider            = NewSetting("disable-local-auth-provider", "false")
 	EngineInstallURL                    = NewSetting("engine-install-url", "https://releases.rancher.com/install-docker/28.1.sh")
 	EngineISOURL                        = NewSetting("engine-iso-url", "https://releases.rancher.com/os/latest/rancheros-vmware.iso")
