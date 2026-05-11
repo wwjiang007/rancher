@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -156,6 +157,10 @@ func tokenKeyIndexer(obj interface{}) ([]string, error) {
 	return []string{token.Token}, nil
 }
 
+func isLocalAuthTokenDisabled() (bool, error) {
+	return strconv.ParseBool(settings.DisableLocalAuthTokens.Get())
+}
+
 // Authenticate authenticates a request using a request's token.
 func (a *tokenAuthenticator) Authenticate(req *http.Request) (*AuthenticatorResponse, error) {
 	token, err := a.TokenFromRequest(req)
@@ -166,6 +171,17 @@ func (a *tokenAuthenticator) Authenticate(req *http.Request) (*AuthenticatorResp
 	if !token.GetIsEnabled() {
 		return nil, errors.Wrapf(ErrMustAuthenticate, "user's token is not enabled")
 	}
+
+	if token.GetAuthProvider() == "local" {
+		disabled, err := isLocalAuthTokenDisabled()
+		if err != nil {
+			return nil, err
+		}
+		if disabled {
+			return nil, errors.Wrapf(ErrMustAuthenticate, "local auth tokens are disabled")
+		}
+	}
+
 	cluster := token.ObjClusterName()
 	if cluster != "" && cluster != a.clusterRouter(req) {
 		return nil, errors.Wrapf(ErrMustAuthenticate, "clusterID does not match")

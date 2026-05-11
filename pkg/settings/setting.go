@@ -84,7 +84,16 @@ var (
 	// accounts, and prevent changes to local user accounts. The webhook
 	// uses this to prevent the same kind of changes, handling operations
 	// from outside the dahsboard, and misbehaviour by the dashboard itself.
-	DisableLocalAuthProvider            = NewSetting("disable-local-auth-provider", "false")
+	DisableLocalAuthProvider = NewSetting("disable-local-auth-provider", "false")
+	// DisableLocalAuthTokens is the second boolean flag controlling partial
+	// disabling of the local auth provider. Setting it causes the
+	// authentication in the backend to reject auth tokens associated with
+	// local user accounts as invalid. Activating it makes only sense when
+	// DisableLocalAuthProvider is set as well. It is separate because a
+	// customer may still wish to allow the use of (long-lived) tokens for
+	// local users even when the local users themselves cannot be modified,
+	// nor login into the dashboard.
+	DisableLocalAuthTokens              = NewSetting("disable-local-auth-tokens", "false")
 	EngineInstallURL                    = NewSetting("engine-install-url", "https://releases.rancher.com/install-docker/28.1.sh")
 	EngineISOURL                        = NewSetting("engine-iso-url", "https://releases.rancher.com/os/latest/rancheros-vmware.iso")
 	EngineNewestVersion                 = NewSetting("engine-newest-version", "v17.12.0")
