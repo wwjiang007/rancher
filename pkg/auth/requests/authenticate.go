@@ -158,7 +158,11 @@ func tokenKeyIndexer(obj interface{}) ([]string, error) {
 }
 
 func isLocalAuthTokenDisabled() (bool, error) {
-	return strconv.ParseBool(settings.DisableLocalAuthTokens.Get())
+	disabled, err := strconv.ParseBool(settings.DisableLocalAuthTokens.Get())
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	return disabled, nil
 }
 
 // Authenticate authenticates a request using a request's token.
