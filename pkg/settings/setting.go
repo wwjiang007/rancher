@@ -83,7 +83,7 @@ var (
 	// `true` the dashboard is expected to prevent logins with local user
 	// accounts, and prevent changes to local user accounts. The webhook
 	// uses this to prevent the same kind of changes, handling operations
-	// from outside the dahsboard, and misbehaviour by the dashboard itself.
+	// from outside the dashboard, and misbehaviour by the dashboard itself.
 	DisableLocalAuthProvider = NewSetting("disable-local-auth-provider", "false")
 	// DisableLocalAuthTokens is the second boolean flag controlling partial
 	// disabling of the local auth provider. Setting it causes the
