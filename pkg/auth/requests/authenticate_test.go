@@ -135,6 +135,7 @@ func TestTokenAuthenticatorAuthenticate(t *testing.T) {
 	}
 	providers.Providers = map[string]common.AuthProvider{
 		fakeProvider.name: fakeProvider,
+		"local":           fakeProvider,
 	}
 
 	now := time.Now()
@@ -633,6 +634,37 @@ func TestTokenAuthenticatorAuthenticate(t *testing.T) {
 		require.Nil(t, resp)
 		assert.False(t, userRefresher.called)
 	})
+
+	t.Run("local provider can be specially disabled, not disabled", func(t *testing.T) {
+		oldTokenAuthProvider := token.AuthProvider
+		defer func() { token.AuthProvider = oldTokenAuthProvider }()
+		token.AuthProvider = "local"
+
+		userRefresher.reset()
+
+		resp, err := authenticator.Authenticate(req)
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		assert.True(t, resp.IsAuthed)
+		assert.True(t, userRefresher.called)
+	})
+
+	t.Run("local provider can be specially disabled, is disabled", func(t *testing.T) {
+		oldTokenAuthProvider := token.AuthProvider
+		defer func() {
+			settings.DisableLocalAuthTokens.Set("false")
+			token.AuthProvider = oldTokenAuthProvider
+		}()
+		settings.DisableLocalAuthTokens.Set("true")
+		token.AuthProvider = "local"
+
+		userRefresher.reset()
+
+		resp, err := authenticator.Authenticate(req)
+		require.ErrorIs(t, err, ErrMustAuthenticate)
+		require.Nil(t, resp)
+		assert.False(t, userRefresher.called)
+	})
 }
 
 func TestTokenAuthenticatorAuthenticateExtToken(t *testing.T) {
@@ -646,6 +678,7 @@ func TestTokenAuthenticatorAuthenticateExtToken(t *testing.T) {
 	}
 	providers.Providers = map[string]common.AuthProvider{
 		fakeProvider.name: fakeProvider,
+		"local":           fakeProvider,
 	}
 
 	now := time.Now()
@@ -1190,6 +1223,43 @@ func TestTokenAuthenticatorAuthenticateExtToken(t *testing.T) {
 		req.Header.Set("Authorization", "Bearer ext/"+token.Name+":"+mismatchedToken)
 
 		resp, err := authenticator.Authenticate(req)
+		require.ErrorIs(t, err, ErrMustAuthenticate)
+		require.Nil(t, resp)
+		assert.False(t, userRefresher.called)
+	})
+
+	t.Run("local provider can be specially disabled, not disabled", func(t *testing.T) {
+		oldTokenPrincipal := tokenSecret.Data["principal"]
+		defer func() {
+			tokenSecret.Data["principal"] = oldTokenPrincipal
+		}()
+		token.Spec.UserPrincipal.Provider = "local"
+		newPrincipalBytes, _ := json.Marshal(token.Spec.UserPrincipal)
+		tokenSecret.Data["principal"] = newPrincipalBytes
+
+		userRefresher.reset()
+		resp, err := authenticator.Authenticate(req)
+
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		assert.True(t, resp.IsAuthed)
+		assert.True(t, userRefresher.called)
+	})
+
+	t.Run("local provider can be specially disabled, is disabled", func(t *testing.T) {
+		oldTokenPrincipal := tokenSecret.Data["principal"]
+		defer func() {
+			tokenSecret.Data["principal"] = oldTokenPrincipal
+			settings.DisableLocalAuthTokens.Set("false")
+		}()
+		settings.DisableLocalAuthTokens.Set("true")
+		token.Spec.UserPrincipal.Provider = "local"
+		newPrincipalBytes, _ := json.Marshal(token.Spec.UserPrincipal)
+		tokenSecret.Data["principal"] = newPrincipalBytes
+
+		userRefresher.reset()
+		resp, err := authenticator.Authenticate(req)
+
 		require.ErrorIs(t, err, ErrMustAuthenticate)
 		require.Nil(t, resp)
 		assert.False(t, userRefresher.called)
